@@ -4461,13 +4461,14 @@ impl QuicTransport {
                                                             return;
                                                         }
 
-                                                        pm.learn_node_from_gossip_with_hrw_and_work(
+                                                        pm.learn_node_from_gossip_with_hrw_work_and_auth(
                                                             node_id,
                                                             verified_hrw,
                                                             hb.addr,
                                                             hops as u8,
                                                             Some(remote_addr),
                                                             work_score,
+                                                            true,
                                                         ).await;
 
                                                         if is_f2f {

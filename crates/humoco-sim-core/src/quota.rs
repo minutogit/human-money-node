@@ -341,6 +341,14 @@ pub const FRACTIONAL_BITS: u32 = 32;
 /// Guarantees that `(bounded * factor as u128)` never overflows u128 during dyadic table interpolation.
 pub const MAX_SCALED_USAGE: u128 = ((u64::MAX as u128) << FRACTIONAL_BITS) | 0xFFFF_FFFF;
 
+/// Converts a scaled Q96.32 value to integer whole units, clamping to `MAX_SCALED_USAGE`
+/// to eliminate any possibility of wrapping or truncation overflow.
+#[inline]
+pub fn scaled_to_whole_units(scaled: u128) -> u64 {
+    let shifted = scaled.min(MAX_SCALED_USAGE) >> FRACTIONAL_BITS;
+    u64::try_from(shifted).unwrap_or(u64::MAX)
+}
+
 /// Computes the exponential decay of a scaled Q96.32 metric with a 24-hour half-life (86,400s):
 /// - Decays exactly 50% every 86,400s (24 hours).
 /// - Pure bounded integer arithmetic via u128 without precision loss across frequent updates.
@@ -375,7 +383,7 @@ pub fn decay_scaled_ema(value_scaled: u128, delta_secs: u64) -> u128 {
 /// - If `delta_secs >= 64 * 86_400`: decays completely to 0.
 pub fn decay_integer_ema(value: u64, delta_secs: u64) -> u64 {
     let scaled = (value as u128) << FRACTIONAL_BITS;
-    (decay_scaled_ema(scaled, delta_secs) >> FRACTIONAL_BITS) as u64
+    scaled_to_whole_units(decay_scaled_ema(scaled, delta_secs))
 }
 
 /// Computes the integer EMA with 24h half-life decay followed by addition of footprint:
@@ -548,12 +556,12 @@ impl RollingQuotaCounter {
 
     /// Computes the effective decayed usage at timestamp `now_sec` rounded down to whole integer units.
     pub fn usage_at(&self, now_sec: u64) -> u64 {
-        (self.usage_scaled_at(now_sec) >> FRACTIONAL_BITS) as u64
+        scaled_to_whole_units(self.usage_scaled_at(now_sec))
     }
 
     /// Returns the raw cached whole-integer usage at the last recorded timestamp (without projecting forward).
     pub fn raw_cached_usage(&self) -> u64 {
-        (self.decayed_usage_scaled >> FRACTIONAL_BITS) as u64
+        scaled_to_whole_units(self.decayed_usage_scaled)
     }
 
     /// Returns the raw cached scaled usage (Q96.32) at the last recorded timestamp.
@@ -580,14 +588,14 @@ impl RollingQuotaCounter {
         let limit_scaled = (limit as u128) << FRACTIONAL_BITS;
 
         let available_scaled = limit_scaled.saturating_sub(current_scaled);
-        let available = (available_scaled >> FRACTIONAL_BITS) as u64;
+        let available = scaled_to_whole_units(available_scaled);
 
         match current_scaled.checked_add(amount_scaled) {
             Some(new_scaled) if new_scaled <= limit_scaled => {
                 self.decayed_usage_scaled = new_scaled;
                 self.last_update_sec =
                     Some(self.last_update_sec.map_or(now_sec, |last| last.max(now_sec)));
-                Ok((new_scaled >> FRACTIONAL_BITS) as u64)
+                Ok(scaled_to_whole_units(new_scaled))
             }
             _ => Err(available),
         }
@@ -696,7 +704,7 @@ impl NetworkThermometer {
             && self.node_write_usage.len() >= MAX_TRACKED_NODES
         {
             self.node_write_usage
-                .retain(|_, counter| counter.usage_at(now_sec) > 0);
+                .retain(|_, counter| counter.usage_scaled_at(now_sec) > 0);
         }
         let counter = self.node_write_usage.entry(node_id).or_default();
         counter.try_consume(now_sec, footprint_byte_years, quota_byte_years)
@@ -729,7 +737,7 @@ impl NetworkThermometer {
             && self.node_read_usage.len() >= MAX_TRACKED_NODES
         {
             self.node_read_usage
-                .retain(|_, counter| counter.usage_at(now_sec) > 0);
+                .retain(|_, counter| counter.usage_scaled_at(now_sec) > 0);
         }
         let counter = self.node_read_usage.entry(node_id).or_default();
         counter.try_consume(now_sec, credits, quota)
@@ -847,7 +855,9 @@ impl NetworkThermometer {
         };
         let decayed_scaled = decay_scaled_ema(self.write_ema_scaled, delta);
         let footprint_scaled = (footprint_micro_bj as u128) << FRACTIONAL_BITS;
-        self.write_ema_scaled = decayed_scaled.saturating_add(footprint_scaled);
+        self.write_ema_scaled = decayed_scaled
+            .saturating_add(footprint_scaled)
+            .min(MAX_SCALED_USAGE);
         self.last_write_ema_sec = Some(match self.last_write_ema_sec {
             None => now_sec,
             Some(last) => now_sec.max(last),
@@ -856,7 +866,7 @@ impl NetworkThermometer {
 
     /// Returns the current raw write EMA accumulator in micro-Byte-Years (µBJ)
     pub fn current_write_ema_micro_bj(&self) -> u64 {
-        (self.write_ema_scaled >> FRACTIONAL_BITS) as u64
+        scaled_to_whole_units(self.write_ema_scaled)
     }
 
     /// Evaluates decayed write EMA accumulator in micro-Byte-Years at `now_sec` (S07-10).
@@ -865,7 +875,7 @@ impl NetworkThermometer {
             None => 0,
             Some(last) => now_sec.saturating_sub(last),
         };
-        (decay_scaled_ema(self.write_ema_scaled, delta) >> FRACTIONAL_BITS) as u64
+        scaled_to_whole_units(decay_scaled_ema(self.write_ema_scaled, delta))
     }
 
     /// Evaluates decayed read EMA accumulator in credits at `now_sec` (S07-10).
@@ -874,7 +884,7 @@ impl NetworkThermometer {
             None => 0,
             Some(last) => now_sec.saturating_sub(last),
         };
-        (decay_scaled_ema(self.read_ema_scaled, delta) >> FRACTIONAL_BITS) as u64
+        scaled_to_whole_units(decay_scaled_ema(self.read_ema_scaled, delta))
     }
 
     /// Monotonically decays and advances EMA accumulators to `now_sec` (S07-10).
@@ -905,8 +915,8 @@ impl NetworkThermometer {
         }
 
         (
-            (self.write_ema_scaled >> FRACTIONAL_BITS) as u64,
-            (self.read_ema_scaled >> FRACTIONAL_BITS) as u64,
+            scaled_to_whole_units(self.write_ema_scaled),
+            scaled_to_whole_units(self.read_ema_scaled),
         )
     }
 
@@ -935,7 +945,9 @@ impl NetworkThermometer {
         };
         let decayed_scaled = decay_scaled_ema(self.read_ema_scaled, delta);
         let credits_scaled = (credits as u128) << FRACTIONAL_BITS;
-        self.read_ema_scaled = decayed_scaled.saturating_add(credits_scaled);
+        self.read_ema_scaled = decayed_scaled
+            .saturating_add(credits_scaled)
+            .min(MAX_SCALED_USAGE);
         self.last_read_ema_sec = Some(match self.last_read_ema_sec {
             None => now_sec,
             Some(last) => now_sec.max(last),
@@ -944,7 +956,7 @@ impl NetworkThermometer {
 
     /// Returns the current raw read EMA accumulator in credits
     pub fn current_read_ema_credits(&self) -> u64 {
-        (self.read_ema_scaled >> FRACTIONAL_BITS) as u64
+        scaled_to_whole_units(self.read_ema_scaled)
     }
 
     /// Computes the rolling 24-hour read daily rate in credits at a specific time `now_sec`

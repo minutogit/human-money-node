@@ -3,6 +3,7 @@ use humoco_node::daemon::{sync_single_shard, ShardReadinessManager};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::network::{DefaultRequestHandler, NodeRequestHandler, PeerManager, QuicTransport};
 use humoco_node::storage::{DualTierEngine, RedbStorage};
+use humoco_sim_core::wire::{MsgType, WireHeader};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -487,13 +488,14 @@ async fn test_s06_01_initial_admission_requires_24h_age_and_eight_hourly_observa
 
     // 1. Accept 1 valid heartbeat at t0 (hour slot = t0_ms / 3_600_000)
     manager
-        .learn_node_from_gossip_with_hrw_and_work(
+        .learn_node_from_gossip_with_hrw_work_and_auth(
             *newcomer.node_pubkey(),
             *newcomer.hrw_routing_id(),
             addr,
             0,
             None,
             newcomer.work_score(),
+            true,
         )
         .await;
     manager
@@ -641,4 +643,196 @@ async fn test_s06_01_initial_admission_requires_24h_age_and_eight_hourly_observa
         "S06-01: Admitted newcomer MUST be in active_hrw_nodes"
     );
 }
+
+#[tokio::test]
+async fn test_s06_09_initial_admission_aged_hourly_slots_window_expiration() {
+    let initial = Instant::now();
+    let (newcomer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .expect("mine ticket newcomer");
+    let (local, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .expect("mine ticket local");
+
+    let manager = Arc::new(PeerManager::new(vec![]));
+    manager.set_min_work_floor_for_test(1);
+    assert!(manager.effective_incubation_duration().as_secs() >= 86400);
+
+    let addr = "127.0.0.1:31418".parse().expect("address");
+    let hour_ms = 3_600_000u64;
+    let current_hour = manager.net_time_ms() / hour_ms;
+    let start_hour = current_hour - 24;
+
+    manager
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *newcomer.node_pubkey(),
+            *newcomer.hrw_routing_id(),
+            addr,
+            1,
+            Some(addr),
+            newcomer.work_score(),
+            true,
+        )
+        .await;
+
+    // 1. Eight observations recorded when observed age is only 21h (before 24h maturity)
+    manager
+        .set_first_seen_for_test(
+            newcomer.node_pubkey(),
+            initial - Duration::from_secs(21 * 3600),
+        )
+        .await;
+    for slot in [0, 1, 2, 3, 4, 5, 6, 21] {
+        manager
+            .record_heartbeat_hourly_observation(
+                *newcomer.node_pubkey(),
+                *newcomer.hrw_routing_id(),
+                (start_hour + slot) * hour_ms,
+            )
+            .await;
+    }
+
+    // Before 24h maturity: MUST NOT be qualified
+    assert!(
+        !manager.is_hrw_eligible(newcomer.node_pubkey()).await,
+        "S06-09: Immature node (<24h observed age) must NOT be HRW eligible"
+    );
+
+    // 2. Advance observed age to 24h without delivering another heartbeat.
+    // Presence is 3h old (well within the 3h15m presence freshness limit).
+    manager
+        .set_first_seen_for_test(
+            newcomer.node_pubkey(),
+            initial - Duration::from_secs(24 * 3600),
+        )
+        .await;
+    manager
+        .set_last_seen_for_test(
+            newcomer.node_pubkey(),
+            initial - Duration::from_secs(3 * 3600),
+        )
+        .await;
+
+    // At hour 24, slot 0 has aged out of the current 24-hour window, leaving only 7 valid slots:
+    // S06-09 Invariant: Require EXCLUSION from shard_committee, active HRW selection,
+    // regional mesh export, and qualified-ticket persistence!
+    let (committee, _, _) = manager
+        .shard_committee(*local.node_pubkey(), *local.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        !committee
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "S06-09: Node with only 7 valid slots in current 24h window must be EXCLUDED from shard_committee"
+    );
+
+    let active_hrw = manager.active_hrw_nodes().await;
+    assert!(
+        !active_hrw
+            .iter()
+            .any(|(hrw, _)| hrw == newcomer.hrw_routing_id()),
+        "S06-09: Node with only 7 valid slots in current 24h window must be EXCLUDED from active_hrw_nodes"
+    );
+
+    let mesh_view = manager.regional_mesh_view(&local, 0).await.expect("mesh view");
+    assert!(
+        !mesh_view
+            .members
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "S06-09: Node with only 7 valid slots in current 24h window must be EXCLUDED from regional_mesh_view"
+    );
+
+    let snap = manager.snapshot_qualified_tickets().await;
+    assert!(
+        !snap.iter().any(|(pk, _)| pk == newcomer.node_pubkey()),
+        "S06-09: Node with only 7 valid slots in current 24h window must be EXCLUDED from snapshot_qualified_tickets"
+    );
+
+    // 3. Positive control: Add fresh current 8th observation at current_hour.
+    // Now it genuinely has 8 valid slots in the current 24-hour window AND >= 24h observed age!
+    manager
+        .record_heartbeat_hourly_observation(
+            *newcomer.node_pubkey(),
+            *newcomer.hrw_routing_id(),
+            current_hour * hour_ms,
+        )
+        .await;
+
+    let (committee_admitted, _, _) = manager
+        .shard_committee(*local.node_pubkey(), *local.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        committee_admitted
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "S06-09: Positive control with 8 current slots and >=24h age MUST be admitted to shard_committee"
+    );
+
+    let active_hrw_admitted = manager.active_hrw_nodes().await;
+    assert!(
+        active_hrw_admitted
+            .iter()
+            .any(|(hrw, _)| hrw == newcomer.hrw_routing_id()),
+        "S06-09: Positive control with 8 current slots MUST be in active_hrw_nodes"
+    );
+
+    let mesh_view_admitted = manager.regional_mesh_view(&local, 0).await.expect("mesh view");
+    assert!(
+        mesh_view_admitted
+            .members
+            .iter()
+            .any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "S06-09: Positive control with 8 current slots MUST be in regional_mesh_view"
+    );
+
+    let snap_admitted = manager.snapshot_qualified_tickets().await;
+    assert!(
+        snap_admitted.iter().any(|(pk, _)| pk == newcomer.node_pubkey()),
+        "S06-09: Positive control with 8 current slots MUST be in snapshot_qualified_tickets"
+    );
+
+    // 4. Real-QUIC validation:
+    let cancel = CancellationToken::new();
+    let transport_local = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &local,
+        manager.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind local transport");
+    let pm_newcomer = Arc::new(PeerManager::new(vec![]));
+    let transport_newcomer = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &newcomer,
+        pm_newcomer.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind newcomer transport");
+
+    transport_local.spawn_accept_loop();
+    transport_newcomer.spawn_accept_loop();
+
+    let local_addr = transport_local.local_addr().expect("local addr");
+    let conn = transport_newcomer
+        .connect_peer_unchecked(local_addr)
+        .await
+        .expect("connect over real QUIC");
+
+    let hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, 0);
+    let _ = transport_newcomer.send_unidirectional(&conn, &hdr, &[]).await;
+
+    let (comm_after_quic, _, _) = manager
+        .shard_committee(*local.node_pubkey(), *local.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        comm_after_quic.iter().any(|m| m.node_pubkey == *newcomer.node_pubkey()),
+        "Newcomer remains committee-eligible during real-QUIC interaction"
+    );
+
+    cancel.cancel();
+}
+
 

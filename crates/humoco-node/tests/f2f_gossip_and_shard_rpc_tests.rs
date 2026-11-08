@@ -1552,4 +1552,203 @@ async fn test_s06_07_rpc_failure_suspension_does_not_suppress_gossip_heartbeats(
     cancel_d.cancel();
 }
 
+#[tokio::test]
+async fn test_s06_08_authenticated_relay_endpoint_update_over_real_quic() {
+    let observer = NodeIdentity::generate();
+    let relay = NodeIdentity::generate();
+    let (origin, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine ticket");
+
+    let cancel_obs = CancellationToken::new();
+    let cancel_rel = CancellationToken::new();
+
+    let pm_obs = Arc::new(PeerManager::with_f2f(vec![], vec![*relay.node_pubkey()]));
+    pm_obs.set_min_work_floor_for_test(1);
+    let pm_rel = Arc::new(PeerManager::with_f2f(vec![], vec![*observer.node_pubkey()]));
+    pm_rel.set_min_work_floor_for_test(1);
+
+    let receiver = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &observer,
+        pm_obs.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_obs.clone(),
+    )
+    .expect("bind receiver");
+
+    let sender = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &relay,
+        pm_rel.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_rel.clone(),
+    )
+    .expect("bind sender");
+
+    let receiver_addr = receiver.local_addr().expect("local addr");
+    let sender_addr = sender.local_addr().expect("local addr");
+
+    pm_obs.register_f2f_friend(*relay.node_pubkey(), Some(sender_addr)).await;
+    pm_rel.register_f2f_friend(*observer.node_pubkey(), Some(receiver_addr)).await;
+
+    receiver.spawn_accept_loop();
+    sender.spawn_accept_loop();
+
+    let conn = sender
+        .connect_peer_unchecked(receiver_addr)
+        .await
+        .expect("connect");
+
+    let old_addr: SocketAddr = "127.0.0.1:32001".parse().unwrap();
+    let new_addr: SocketAddr = "127.0.0.1:32002".parse().unwrap();
+
+    // 1. Observer initially learns origin at old_addr
+    pm_obs
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *origin.node_pubkey(),
+            *origin.hrw_routing_id(),
+            old_addr,
+            1,
+            Some(sender_addr),
+            origin.work_score(),
+            true,
+        )
+        .await;
+
+    assert_eq!(
+        pm_obs.get_known_node_addr(origin.node_pubkey()).await,
+        Some(old_addr)
+    );
+
+    // 2. Negative test: Forged signature relay heartbeat -> strictly rejected, old_addr kept
+    let hb_forged = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *origin.node_pubkey(),
+        addr: new_addr,
+        timestamp_ms: pm_obs.net_time_ms(),
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0xfe; 64], // invalid signature
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: *origin.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 15,
+    };
+    let bytes_forged = bincode::serialize(&hb_forged).unwrap();
+    let mut hdr_forged = WireHeader::new(
+        MsgType::Heartbeat as u16,
+        1,
+        0,
+        0,
+        bytes_forged.len() as u32,
+    );
+    hdr_forged.reserved = 1; // relayed hops = 1
+    sender
+        .send_unidirectional(&conn, &hdr_forged, &bytes_forged)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        pm_obs.get_known_node_addr(origin.node_pubkey()).await,
+        Some(old_addr),
+        "Forged relay heartbeat must be rejected, keeping old endpoint"
+    );
+
+    // 3. Negative test: Wrong network ID -> strictly rejected, old_addr kept
+    let mut hb_wrong_net = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *origin.node_pubkey(),
+        addr: new_addr,
+        timestamp_ms: pm_obs.net_time_ms(),
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: *origin.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 15,
+    };
+    hb_wrong_net.sign_origin(&origin, pm_obs.net_time_ms(), humoco_sim_core::types::NetworkId::Testnet);
+    let bytes_wrong_net = bincode::serialize(&hb_wrong_net).unwrap();
+    let mut hdr_wrong_net = WireHeader::new(
+        MsgType::Heartbeat as u16,
+        2,
+        0,
+        0,
+        bytes_wrong_net.len() as u32,
+    );
+    hdr_wrong_net.reserved = 1; // relayed hops = 1
+    sender
+        .send_unidirectional(&conn, &hdr_wrong_net, &bytes_wrong_net)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        pm_obs.get_known_node_addr(origin.node_pubkey()).await,
+        Some(old_addr),
+        "Wrong-network relay heartbeat must be rejected, keeping old endpoint"
+    );
+
+    // 4. Positive test: Fresh valid origin-signed heartbeat updating endpoint to new_addr
+    let mut hb_valid = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *origin.node_pubkey(),
+        addr: new_addr,
+        timestamp_ms: pm_obs.net_time_ms(),
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: *origin.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 15,
+    };
+    hb_valid.sign_origin(&origin, pm_obs.net_time_ms(), humoco_sim_core::types::NetworkId::Mainnet);
+    assert!(hb_valid.verify_origin_address_binding(humoco_sim_core::types::NetworkId::Mainnet));
+
+    let bytes_valid = bincode::serialize(&hb_valid).unwrap();
+    let mut hdr_valid = WireHeader::new(
+        MsgType::Heartbeat as u16,
+        3,
+        0,
+        0,
+        bytes_valid.len() as u32,
+    );
+    hdr_valid.reserved = 1; // relayed hops = 1
+    sender
+        .send_unidirectional(&conn, &hdr_valid, &bytes_valid)
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if pm_obs.get_known_node_addr(origin.node_pubkey()).await == Some(new_addr) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        pm_obs.get_known_node_addr(origin.node_pubkey()).await,
+        Some(new_addr),
+        "S06-08: Authenticated origin-signed relay endpoint update must update learned endpoint to new_addr"
+    );
+
+    cancel_obs.cancel();
+    cancel_rel.cancel();
+}
+
+
 

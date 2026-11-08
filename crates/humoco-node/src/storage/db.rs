@@ -130,7 +130,7 @@ pub const TABLE_BANNED_NODES: TableDefinition<&[u8; 32], u64> =
     TableDefinition::new("banned_nodes");
 pub const TABLE_SYSTEM_AUDIT_EVENTS: TableDefinition<u64, &[u8]> =
     TableDefinition::new("system_audit_events");
-pub const TABLE_TICKET_OBSERVATIONS: TableDefinition<&[u8; 64], [u8; 9]> =
+pub const TABLE_TICKET_OBSERVATIONS: TableDefinition<&[u8; 64], [u8; 17]> =
     TableDefinition::new("ticket_observations");
 pub const TABLE_INGRESS_ACCOUNTING: TableDefinition<u8, &[u8]> =
     TableDefinition::new("ingress_accounting_state");
@@ -835,16 +835,31 @@ impl RedbStorage {
     }
 }
 
-/// Persisted `(node_pubkey, hrw_routing_id, first_seen_ms, admission_qualified)` maturation record.
+/// Persisted `(node_pubkey, hrw_routing_id, seen_ms, admission_qualified)` maturation entry.
 pub type TicketObservationRow = ([u8; 32], [u8; 32], u64, bool);
 
+/// Persisted `(node_pubkey, hrw_routing_id, first_seen_ms, last_seen_ms, admission_qualified)` maturation record (Spec 07 §4 / INV-0705).
+pub type TicketObservationRecord = ([u8; 32], [u8; 32], u64, u64, bool);
+
 impl RedbStorage {
-    /// Persists first-seen timestamps (`first_seen_ms`) and admission qualification
-    /// for `(node_pubkey, hrw_routing_id)` pairs, preserving earliest `first_seen_ms`
-    /// and latching `admission_qualified = old_qualified || new_qualified` (INV-0303, INV-0703).
+    /// Persists first-seen timestamps (`first_seen_ms`), bounded presence timestamps (`last_seen_ms`),
+    /// and admission qualification for `(node_pubkey, hrw_routing_id)` pairs, preserving earliest `first_seen_ms`,
+    /// tracking latest `last_seen_ms`, and latching `admission_qualified` (INV-0303, INV-0703, INV-0705).
     pub fn record_ticket_observations(
         &self,
         entries: &[TicketObservationRow],
+    ) -> Result<usize, StorageError> {
+        let full_entries: Vec<TicketObservationRecord> = entries
+            .iter()
+            .map(|&(pubkey, hrw, seen_ms, qualified)| (pubkey, hrw, seen_ms, seen_ms, qualified))
+            .collect();
+        self.record_ticket_observation_records(&full_entries)
+    }
+
+    /// Persists full maturation records with explicit `first_seen_ms` and `last_seen_ms` timestamps.
+    pub fn record_ticket_observation_records(
+        &self,
+        entries: &[TicketObservationRecord],
     ) -> Result<usize, StorageError> {
         if entries.is_empty() {
             return Ok(0);
@@ -853,23 +868,33 @@ impl RedbStorage {
         let mut modified = 0usize;
         {
             let mut table = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
-            for &(pubkey, hrw, seen_ms, qualified) in entries {
+            for &(pubkey, hrw, first_seen_ms, last_seen_ms, qualified) in entries {
                 let mut key = [0u8; 64];
                 key[..32].copy_from_slice(&pubkey);
                 key[32..].copy_from_slice(&hrw);
 
-                let (final_seen_ms, final_qualified) = if let Some(guard) = table.get(&key)? {
+                let (final_first_ms, final_last_ms, final_qualified) = if let Some(guard) = table.get(&key)? {
                     let old_val = guard.value();
-                    let old_ms = u64::from_le_bytes(old_val[0..8].try_into().unwrap_or([0u8; 8]));
-                    let old_qualified = old_val[8] != 0;
-                    (old_ms.min(seen_ms), old_qualified || qualified)
+                    if old_val.len() == 17 {
+                        let old_first_ms = u64::from_le_bytes(old_val[0..8].try_into().unwrap_or([0u8; 8]));
+                        let old_last_ms = u64::from_le_bytes(old_val[8..16].try_into().unwrap_or([0u8; 8]));
+                        let old_qualified = old_val[16] != 0;
+                        (
+                            old_first_ms.min(first_seen_ms),
+                            old_last_ms.max(last_seen_ms),
+                            old_qualified || qualified,
+                        )
+                    } else {
+                        (first_seen_ms, last_seen_ms, qualified)
+                    }
                 } else {
-                    (seen_ms, qualified)
+                    (first_seen_ms, last_seen_ms, qualified)
                 };
 
-                let mut new_val = [0u8; 9];
-                new_val[0..8].copy_from_slice(&final_seen_ms.to_le_bytes());
-                new_val[8] = if final_qualified { 1 } else { 0 };
+                let mut new_val = [0u8; 17];
+                new_val[0..8].copy_from_slice(&final_first_ms.to_le_bytes());
+                new_val[8..16].copy_from_slice(&final_last_ms.to_le_bytes());
+                new_val[16] = if final_qualified { 1 } else { 0 };
 
                 let needs_write = match table.get(&key)? {
                     Some(guard) => guard.value() != new_val,
@@ -885,8 +910,8 @@ impl RedbStorage {
         Ok(modified)
     }
 
-    /// Loads all persisted `(node_pubkey, hrw_routing_id, first_seen_ms, admission_qualified)` maturation entries.
-    pub fn all_ticket_observations(&self) -> Result<Vec<TicketObservationRow>, StorageError> {
+    /// Loads all persisted `(node_pubkey, hrw_routing_id, first_seen_ms, last_seen_ms, admission_qualified)` maturation entries.
+    pub fn all_ticket_observations(&self) -> Result<Vec<TicketObservationRecord>, StorageError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
         let mut results = Vec::new();
@@ -901,17 +926,68 @@ impl RedbStorage {
                     continue;
                 }
             };
-            let raw = k_guard.value();
+            let raw_key = k_guard.value();
+            if raw_key.len() != 64 {
+                continue;
+            }
             let mut pubkey = [0u8; 32];
             let mut hrw = [0u8; 32];
-            pubkey.copy_from_slice(&raw[..32]);
-            hrw.copy_from_slice(&raw[32..]);
+            pubkey.copy_from_slice(&raw_key[..32]);
+            hrw.copy_from_slice(&raw_key[32..]);
             let val = v_guard.value();
-            let seen_ms = u64::from_le_bytes(val[0..8].try_into().unwrap_or([0u8; 8]));
-            let qualified = val[8] != 0;
-            results.push((pubkey, hrw, seen_ms, qualified));
+            if val.len() != 17 {
+                continue;
+            }
+            let first_seen_ms = u64::from_le_bytes(val[0..8].try_into().unwrap_or([0u8; 8]));
+            let last_seen_ms = u64::from_le_bytes(val[8..16].try_into().unwrap_or([0u8; 8]));
+            let qualified = val[16] != 0;
+            results.push((pubkey, hrw, first_seen_ms, last_seen_ms, qualified));
         }
         Ok(results)
+    }
+
+    /// Prunes dormant remote and friend ticket observations that exceed their respective retention windows
+    /// (60-day remote retention / 1-year direct friend retention per Spec 07 §4 / INV-0705).
+    pub fn prune_dormant_ticket_observations<F>(
+        &self,
+        now_ms: u64,
+        is_direct_friend: F,
+    ) -> Result<usize, StorageError>
+    where
+        F: Fn(&[u8; 32]) -> bool,
+    {
+        let write_txn = self.db.begin_write()?;
+        let mut pruned = 0usize;
+        {
+            let mut table = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+            let mut keys_to_delete = Vec::new();
+            for (k, v) in table.iter()?.flatten() {
+                let raw_key = k.value();
+                let raw_val = v.value();
+                if raw_key.len() == 64 && raw_val.len() == 17 {
+                    let mut pk = [0u8; 32];
+                    pk.copy_from_slice(&raw_key[..32]);
+                    let last_seen_ms = u64::from_le_bytes(raw_val[8..16].try_into().unwrap_or([0u8; 8]));
+                    let is_friend = is_direct_friend(&pk);
+                    let retention_ms = if is_friend {
+                        crate::network::manager::DIRECT_FRIEND_RETENTION_MS
+                    } else {
+                        crate::network::manager::REMOTE_METADATA_RETENTION_MS
+                    };
+                    if now_ms.saturating_sub(last_seen_ms) > retention_ms {
+                        let mut key_arr = [0u8; 64];
+                        key_arr.copy_from_slice(raw_key);
+                        keys_to_delete.push(key_arr);
+                    }
+                }
+            }
+            for k in keys_to_delete {
+                table.remove(&k)?;
+                pruned += 1;
+            }
+        }
+        write_txn.commit()?;
+        Ok(pruned)
     }
 
     /// Retrieves quota remaining byte years for an account tag. Defaults to 0 if not present.

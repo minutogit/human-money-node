@@ -699,6 +699,45 @@ impl FraudProofPayload {
         true
     }
 
+    /// Maximum linear secant interpolation error of the 64-step dyadic lookup table in Q32 format.
+    ///
+    /// In `quota.rs`, `DYADIC_HALF_LIFE_TABLE` partitions 24 hours (86,400s) into 64 uniform intervals of
+    /// length T = 1,350s (h = T/H = 1/64 of a 24h half-life).
+    ///
+    /// Because f(t) = 2^(-t/H) is strictly convex, every linear secant interpolation factor
+    /// L(dt) satisfies L(dt) >= 2^(-dt/H) - 2^-32.
+    /// The maximum secant height above the convex exponential curve across all 64 intervals is
+    /// bounded by:
+    ///   delta_max = max_{i, rem} [ y_i - ((y_i - y_{i+1}) * rem)/1350 - 2^(-(i*1350 + rem)/86400) * 2^32 ]
+    ///             = 62,635 in Q32 format (62,635 / 2^32 < 1.466e-5 < 0.0015%).
+    pub const MAX_DYADIC_SECANT_ERROR_Q32: u128 = 62_635;
+
+    /// Maximum composite Q32 factor discrepancy across both secant convexity (<= 62,635)
+    /// and cumulative table knot under-rounding (<= 4,096 over <= 64 days).
+    pub const MAX_COMPOSITE_DECAY_SLACK_Q32: u128 = 66_732;
+
+    /// Computes the conservative lower bound of decayed EMA directly in Q96.32 scaled space
+    /// before converting to whole units, avoiding boundary truncation flaws (S07-12).
+    pub fn conservative_min_decayed_ema(v1: u64, max_delta_secs: u64) -> u64 {
+        if v1 == 0 {
+            return 0;
+        }
+        if max_delta_secs == 0 {
+            return v1;
+        }
+        if max_delta_secs >= 64 * 86_400 {
+            return 0;
+        }
+        let v1_min_scaled = (v1 as u128) << crate::quota::FRACTIONAL_BITS;
+        let direct_scaled = crate::quota::decay_scaled_ema(v1_min_scaled, max_delta_secs);
+        let factor_slack_scaled = (v1 as u128).saturating_mul(Self::MAX_COMPOSITE_DECAY_SLACK_Q32);
+        let shift_truncation_slack_scaled = max_delta_secs as u128;
+        let min_scaled = direct_scaled
+            .saturating_sub(factor_slack_scaled)
+            .saturating_sub(shift_truncation_slack_scaled);
+        crate::quota::scaled_to_whole_units(min_scaled)
+    }
+
     /// Explicit-network verification of ingress counter conflict (S07-11, S07-10).
     pub fn verify_ingress_counter_conflict_network(
         &self,
@@ -735,7 +774,7 @@ impl FraudProofPayload {
             return false;
         }
 
-        // Exact mathematical under-reporting fraud check with physical-time EMA decay (S07-10):
+        // Exact mathematical under-reporting fraud check with physical-time EMA decay (S07-10, S07-12):
         // Canonical normalization by full tuple ensures arrival order (a, b) vs (b, a)
         // produces strictly symmetric results.
         let tuple_a = (
@@ -767,41 +806,40 @@ impl FraudProofPayload {
 
         if p1.epoch_day > 0 || p2.epoch_day > 0 || p1.epoch_seq > 0 || p2.epoch_seq > 0 {
             if p1.epoch_day == p2.epoch_day {
-                if p1.epoch_seq == p2.epoch_seq {
-                    let is_exact_duplicate = p1.op_hash == p2.op_hash
-                        && p1.timestamp_ms == p2.timestamp_ms
-                        && p1.declared_write_ema_micro_bj == p2.declared_write_ema_micro_bj
-                        && p1.declared_read_ema_credits == p2.declared_read_ema_credits
-                        && p1.footprint_micro_bj == p2.footprint_micro_bj
-                        && p1.is_read == p2.is_read
-                        && p1.network_id == p2.network_id;
-                    return !is_exact_duplicate;
-                }
-
-                // Since normalized by full tuple: p2.epoch_seq > p1.epoch_seq
-                let max_delta_secs =
-                    (p2.timestamp_ms / 1000).saturating_sub(p1.timestamp_ms / 1000);
-                let inter_steps = max_delta_secs
-                    .min(p2.epoch_seq.saturating_sub(p1.epoch_seq).saturating_sub(1));
-
-                if p1.declared_write_ema_micro_bj > 0 {
-                    let min_write = crate::quota::decay_integer_ema(
-                        p1.declared_write_ema_micro_bj,
-                        max_delta_secs,
-                    )
-                    .saturating_sub(inter_steps);
-                    if p2.declared_write_ema_micro_bj < min_write {
-                        return true;
+                // Sequence-based fork and sequential progression checks apply strictly to sequenced envelopes (epoch_seq > 0).
+                if p1.epoch_seq > 0 && p2.epoch_seq > 0 {
+                    if p1.epoch_seq == p2.epoch_seq {
+                        let is_exact_duplicate = p1.op_hash == p2.op_hash
+                            && p1.timestamp_ms == p2.timestamp_ms
+                            && p1.declared_write_ema_micro_bj == p2.declared_write_ema_micro_bj
+                            && p1.declared_read_ema_credits == p2.declared_read_ema_credits
+                            && p1.footprint_micro_bj == p2.footprint_micro_bj
+                            && p1.is_read == p2.is_read
+                            && p1.network_id == p2.network_id;
+                        return !is_exact_duplicate;
                     }
-                }
-                if p1.declared_read_ema_credits > 0 {
-                    let min_read = crate::quota::decay_integer_ema(
-                        p1.declared_read_ema_credits,
-                        max_delta_secs,
-                    )
-                    .saturating_sub(inter_steps);
-                    if p2.declared_read_ema_credits < min_read {
-                        return true;
+
+                    // Since normalized by full tuple: p2.epoch_seq > p1.epoch_seq
+                    let max_delta_secs =
+                        (p2.timestamp_ms / 1000).saturating_sub(p1.timestamp_ms / 1000);
+
+                    if p1.declared_write_ema_micro_bj > 0 {
+                        let min_write = Self::conservative_min_decayed_ema(
+                            p1.declared_write_ema_micro_bj,
+                            max_delta_secs,
+                        );
+                        if p2.declared_write_ema_micro_bj < min_write {
+                            return true;
+                        }
+                    }
+                    if p1.declared_read_ema_credits > 0 {
+                        let min_read = Self::conservative_min_decayed_ema(
+                            p1.declared_read_ema_credits,
+                            max_delta_secs,
+                        );
+                        if p2.declared_read_ema_credits < min_read {
+                            return true;
+                        }
                     }
                 }
             }
@@ -812,9 +850,11 @@ impl FraudProofPayload {
 
         let max_delta_secs = (p2.timestamp_ms / 1000).saturating_sub(p1.timestamp_ms / 1000);
         if p1.declared_write_ema_micro_bj > 0 || p2.declared_write_ema_micro_bj > 0 {
-            let min_allowed =
-                crate::quota::decay_integer_ema(p1.declared_write_ema_micro_bj, max_delta_secs)
-                    .saturating_add(p2.footprint_micro_bj);
+            let min_allowed = Self::conservative_min_decayed_ema(
+                p1.declared_write_ema_micro_bj,
+                max_delta_secs,
+            )
+            .saturating_add(p2.footprint_micro_bj);
             if p2.declared_write_ema_micro_bj < min_allowed {
                 return true;
             }
@@ -822,11 +862,11 @@ impl FraudProofPayload {
         false
     }
 
-    /// Transitional helper defaulting to Mainnet.
-    pub fn verify_ingress_counter_conflict(&self) -> bool {
-        self.verify_ingress_counter_conflict_network(crate::types::NetworkId::Mainnet)
-    }
+}
 
+/// Pure helper computing the conservative lower bound of decayed EMA directly in Q96.32 scaled space (S07-12).
+pub fn conservative_min_decayed_ema(v1: u64, max_delta_secs: u64) -> u64 {
+    FraudProofPayload::conservative_min_decayed_ema(v1, max_delta_secs)
 }
 
 #[cfg(test)]

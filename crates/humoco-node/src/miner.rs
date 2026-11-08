@@ -535,7 +535,7 @@ mod tests {
             let mut pk = [0xEE; 32];
             pk[0] = i as u8;
             let addr: SocketAddr = format!("127.0.0.1:{}", 9800 + i).parse().unwrap();
-            pm.learn_node_from_gossip_with_hrw_and_work(pk, pk, addr, 0, None, 1).await;
+            pm.learn_node_from_gossip_with_hrw_work_and_auth(pk, pk, addr, 0, None, 1, true).await;
             pm.set_first_seen_for_test(
                 &pk,
                 std::time::Instant::now() - Duration::from_secs(25 * 3600),

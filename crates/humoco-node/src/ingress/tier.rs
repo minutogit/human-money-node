@@ -999,7 +999,7 @@ impl TierController {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         if !p2p_usage.contains_key(sender_pubkey) && p2p_usage.len() >= 16_384 {
-            p2p_usage.retain(|_, counter| counter.usage_at(now_sec) > 0);
+            p2p_usage.retain(|_, counter| counter.usage_scaled_at(now_sec) > 0);
         }
         let counter = p2p_usage.entry(*sender_pubkey).or_default();
         counter
@@ -1028,7 +1028,7 @@ impl TierController {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         if !p2p_read_usage.contains_key(sender_pubkey) && p2p_read_usage.len() >= 16_384 {
-            p2p_read_usage.retain(|_, counter| counter.usage_at(now_sec) > 0);
+            p2p_read_usage.retain(|_, counter| counter.usage_scaled_at(now_sec) > 0);
         }
         let counter = p2p_read_usage.entry(*sender_pubkey).or_default();
         counter

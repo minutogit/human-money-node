@@ -557,17 +557,39 @@ impl NodeDaemon {
             let sim_mode = self.config.network.simulation_mode;
             match storage.all_ticket_observations() {
                 Ok(observations) => {
-                    for (pk, hrw, first_seen_ms, admission_qualified) in &observations {
+                    for (pk, hrw, first_seen_ms, last_seen_ms, admission_qualified) in &observations {
                         let is_shortcut = *hrw == *blake3::hash(pk).as_bytes()
                             || *hrw == *pk
                             || *hrw == [0u8; 32];
                         if !sim_mode && is_shortcut {
                             continue;
                         }
+                        let is_direct_friend = peer_manager.is_f2f_friend(pk).await;
+                        let retention_ms = if is_direct_friend {
+                            crate::network::manager::DIRECT_FRIEND_RETENTION_MS
+                        } else {
+                            crate::network::manager::REMOTE_METADATA_RETENTION_MS
+                        };
+                        let elapsed_inactivity = boot_now_ms.saturating_sub(*last_seen_ms);
+                        if elapsed_inactivity > retention_ms {
+                            debug!(
+                                node = %hex::encode(pk),
+                                elapsed_ms = elapsed_inactivity,
+                                retention_ms,
+                                "Persisted ticket observation exceeded retention window; expiring on startup"
+                            );
+                            continue;
+                        }
                         let age = std::time::Duration::from_millis(
                             boot_now_ms.saturating_sub(*first_seen_ms),
                         );
-                        peer_manager.seed_persisted_ticket_state(*pk, *hrw, age, *admission_qualified);
+                        peer_manager.seed_persisted_ticket_state_with_last_seen(
+                            *pk,
+                            *hrw,
+                            age,
+                            *admission_qualified,
+                            *last_seen_ms,
+                        );
                         if *pk == local_pk && *hrw == local_hrw {
                             local_prior_age = age;
                             local_prior_qualified = *admission_qualified;
@@ -753,22 +775,30 @@ impl NodeDaemon {
                     _ = interval.tick() => {
                         let now_ms = thermo_pm.net_time_ms();
                         // Persist qualified HRW tickets off the Tokio async worker thread.
-                        let mut qualified_tickets: Vec<([u8; 32], [u8; 32], u64, bool)> = thermo_pm
+                        let mut qualified_tickets: Vec<crate::storage::db::TicketObservationRecord> = thermo_pm
                             .snapshot_qualified_tickets()
                             .await
                             .into_iter()
-                            .map(|(pk, hrw)| (pk, hrw, now_ms, true))
+                            .map(|(pk, hrw)| (pk, hrw, now_ms, now_ms, true))
                             .collect();
                         if thermo_pm.local_ticket_is_mature() {
-                            qualified_tickets.push((thermo_self_ticket.0, thermo_self_ticket.1, now_ms, true));
+                            qualified_tickets.push((thermo_self_ticket.0, thermo_self_ticket.1, now_ms, now_ms, true));
                         }
                         if !qualified_tickets.is_empty() {
                             let persist_storage = thermo_storage.clone();
                             let _ = tokio::task::spawn_blocking(move || {
-                                persist_storage.record_ticket_observations(&qualified_tickets)
+                                persist_storage.record_ticket_observation_records(&qualified_tickets)
                             })
                             .await;
                         }
+                        let prune_storage = thermo_storage.clone();
+                        let friends = thermo_pm.f2f_friends_snapshot().await;
+                        drop(tokio::task::spawn_blocking(move || {
+                            let _ = prune_storage.prune_dormant_ticket_observations(now_ms, move |pk| {
+                                friends.contains(pk)
+                            });
+                        }));
+                        thermo_pm.prune_dormant_known_nodes(std::time::Instant::now()).await;
                         // Mirror sync-readiness for the Provisional -> Final gate.
                         thermo_pm.set_local_sync_ready(
                             thermo_sync_flag.load(std::sync::atomic::Ordering::SeqCst),

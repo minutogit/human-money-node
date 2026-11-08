@@ -1562,3 +1562,166 @@ async fn test_s07_10_real_quic_lawful_ema_decay_over_short_interval_accepted() {
     client_cancel.cancel();
     client_transport.close();
 }
+
+#[tokio::test]
+async fn test_s07_12_real_quic_composed_decay_not_fraudulent_no_ban() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("test_s07_12_shard.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+
+    let shard_cancel = CancellationToken::new();
+    let (engine, _worker) = DualTierEngine::new_with_token(storage.clone(), shard_cancel.clone());
+    let shard_identity = NodeIdentity::generate();
+    let client_identity = NodeIdentity::generate();
+    let honest_author = NodeIdentity::generate();
+    let honest_pub = *honest_author.node_pubkey();
+
+    let shard_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    shard_pm.set_simulation_mode(true);
+
+    let client_pm = Arc::new(PeerManager::with_f2f(Vec::new(), Vec::new()));
+    client_pm.set_simulation_mode(true);
+
+    let shard_handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            shard_identity.clone(),
+            shard_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+    );
+
+    let shard_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &shard_identity,
+        shard_pm.clone(),
+        shard_handler,
+        shard_cancel.clone(),
+    )
+    .expect("bind shard");
+    let shard_addr = shard_transport.local_addr().expect("shard addr");
+    shard_transport.spawn_accept_loop();
+
+    let client_dummy_handler = Arc::new(
+        NodeRequestHandler::with_peer_manager(
+            engine.clone(),
+            storage.clone(),
+            client_identity.clone(),
+            client_pm.clone(),
+        )
+        .with_sync_ready(Arc::new(AtomicBool::new(true))),
+    );
+
+    let client_cancel = CancellationToken::new();
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().expect("addr"),
+        &client_identity,
+        client_pm.clone(),
+        client_dummy_handler,
+        client_cancel.clone(),
+    )
+    .expect("bind client");
+    let client_addr = client_transport.local_addr().expect("client addr");
+    client_transport.spawn_accept_loop();
+
+    shard_pm
+        .register_f2f_friend(*client_identity.node_pubkey(), Some(client_addr))
+        .await;
+    client_pm
+        .register_f2f_friend(*shard_identity.node_pubkey(), Some(shard_addr))
+        .await;
+
+    let conn = client_transport
+        .connect_peer(shard_addr)
+        .await
+        .expect("connect client to shard");
+
+    // Construct genuine S07-12 honest pair directly from NetworkThermometer:
+    let mut therm = humoco_sim_core::quota::NetworkThermometer::new();
+    therm.record_write_ingress(100_000, 1_000_000_000_000);
+    let (write_ema_1, read_ema_1) = therm.checkpoint_emas_at(100_000);
+
+    let env1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
+        honest_author.signing_key(),
+        1,
+        1,
+        100_000_000,
+        write_ema_1,
+        read_ema_1,
+        1,
+        false,
+        [0x10; 32],
+    );
+
+    therm.record_write_ingress(101_350, 1);
+    therm.record_write_ingress(101_891, 1);
+    let (write_ema_3, read_ema_3) = therm.checkpoint_emas_at(101_891);
+
+    let env3 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        humoco_sim_core::types::NetworkId::Mainnet,
+        honest_author.signing_key(),
+        1,
+        3,
+        101_891_000,
+        write_ema_3,
+        read_ema_3,
+        1,
+        false,
+        [0x30; 32],
+    );
+
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_ingress_counter_conflict(env1, env3);
+    let proof_bytes = bincode::serialize(&proof).expect("serialize proof");
+    let evidence_hash = *blake3::hash(&proof_bytes).as_bytes();
+
+    let hdr = WireHeader::new(
+        MsgType::EquivocationProof as u16,
+        1,
+        0,
+        0,
+        proof_bytes.len() as u32,
+    );
+
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &hdr, &proof_bytes)
+        .await
+        .expect("send equivocation proof");
+
+    assert_eq!(
+        resp_hdr.msg_type,
+        MsgType::EquivocationAck as u16,
+        "Transport layer acknowledges message receipt"
+    );
+
+    // CRITICAL: S07-12 honest author must NOT be banned across RAM, PeerManager, or redb storage!
+    assert!(
+        !engine.is_node_banned(&honest_pub).await,
+        "Honest author must NOT be banned in DualTierEngine RAM"
+    );
+    assert!(
+        !shard_pm.is_banned(&honest_pub).await,
+        "Honest author must NOT be banned in PeerManager"
+    );
+    assert!(
+        !storage
+            .is_node_banned(&honest_pub)
+            .expect("check ban"),
+        "Honest author must NOT be banned in redb storage"
+    );
+    assert!(
+        storage
+            .get_evidence(&evidence_hash)
+            .expect("get evidence")
+            .is_none(),
+        "No fraud evidence must be committed to redb storage for honest composed decay"
+    );
+
+    shard_cancel.cancel();
+    shard_transport.close();
+    client_cancel.cancel();
+    client_transport.close();
+}

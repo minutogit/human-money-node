@@ -35,7 +35,7 @@ async fn test_2_2_bootstrap_median_1_and_2_nodes() {
     let pk1 = [1u8; 32];
     let pk2 = [2u8; 32];
 
-    pm.learn_node_from_gossip_with_hrw_and_work(pk1, pk1, addr1, 0, None, 50)
+    pm.learn_node_from_gossip_with_hrw_work_and_auth(pk1, pk1, addr1, 0, None, 50, true)
         .await;
     pm.set_first_seen_for_test(
         &pk1,
@@ -46,7 +46,7 @@ async fn test_2_2_bootstrap_median_1_and_2_nodes() {
     // 1 mature node: median = 50
     assert_eq!(pm.calculate_network_median_work(), 50);
 
-    pm.learn_node_from_gossip_with_hrw_and_work(pk2, pk2, addr2, 0, None, 150)
+    pm.learn_node_from_gossip_with_hrw_work_and_auth(pk2, pk2, addr2, 0, None, 150, true)
         .await;
     pm.set_first_seen_for_test(
         &pk2,
@@ -68,7 +68,7 @@ async fn test_2_3_large_network_median_21_nodes() {
         pk[0] = i as u8;
         let addr: SocketAddr = format!("127.0.0.1:{}", 9100 + i).parse().unwrap();
         let work = (i as u64) * 10;
-        pm.learn_node_from_gossip_with_hrw_and_work(pk, pk, addr, 0, None, work)
+        pm.learn_node_from_gossip_with_hrw_work_and_auth(pk, pk, addr, 0, None, work, true)
             .await;
         pm.set_first_seen_for_test(
             &pk,
@@ -90,7 +90,7 @@ async fn test_2_4_whale_immunity_3_supercomputers() {
         let mut pk = [0u8; 32];
         pk[0] = i as u8;
         let addr: SocketAddr = format!("127.0.0.1:{}", 9200 + i).parse().unwrap();
-        pm.learn_node_from_gossip_with_hrw_and_work(pk, pk, addr, 0, None, 100)
+        pm.learn_node_from_gossip_with_hrw_work_and_auth(pk, pk, addr, 0, None, 100, true)
             .await;
         pm.set_first_seen_for_test(
             &pk,
@@ -105,7 +105,7 @@ async fn test_2_4_whale_immunity_3_supercomputers() {
         let mut pk = [0u8; 32];
         pk[0] = i as u8;
         let addr: SocketAddr = format!("127.0.0.1:{}", 9200 + i).parse().unwrap();
-        pm.learn_node_from_gossip_with_hrw_and_work(pk, pk, addr, 0, None, 1_000_000)
+        pm.learn_node_from_gossip_with_hrw_work_and_auth(pk, pk, addr, 0, None, 1_000_000, true)
             .await;
         pm.set_first_seen_for_test(
             &pk,
@@ -129,7 +129,7 @@ async fn test_3_1_and_3_2_monotonicity_downgrade_and_lateral_rejected() {
     let addr: SocketAddr = "127.0.0.1:9301".parse().unwrap();
 
     // Initial node with W1 = 100
-    pm.learn_node_from_gossip_with_hrw_and_work(pk, hrw1, addr, 0, None, 100)
+    pm.learn_node_from_gossip_with_hrw_work_and_auth(pk, hrw1, addr, 0, None, 100, true)
         .await;
     assert_eq!(pm.get_active_hrw_routing_id(&pk).await.unwrap(), hrw1);
     assert_eq!(pm.get_pending_hrw_routing_id(&pk).await, None);
@@ -155,7 +155,7 @@ async fn test_3_3_monotonicity_upgrade_enters_incubation() {
     let hrw3 = [0x33; 32];
     let addr: SocketAddr = "127.0.0.1:9302".parse().unwrap();
 
-    pm.learn_node_from_gossip_with_hrw_and_work(pk, hrw1, addr, 0, None, 100)
+    pm.learn_node_from_gossip_with_hrw_work_and_auth(pk, hrw1, addr, 0, None, 100, true)
         .await;
 
     // Test 3.3: Upgrade with W3 = 200 (> 100) -> Accepted into 24h incubation
@@ -188,7 +188,7 @@ async fn test_3_4_pending_race_intermediate_rejected_and_higher_overwrites() {
     let hrw5 = [0x55; 32];
     let addr: SocketAddr = "127.0.0.1:9303".parse().unwrap();
 
-    pm.learn_node_from_gossip_with_hrw_and_work(pk, hrw1, addr, 0, None, 100)
+    pm.learn_node_from_gossip_with_hrw_work_and_auth(pk, hrw1, addr, 0, None, 100, true)
         .await;
 
     // W3 = 200 starts incubation
@@ -228,7 +228,7 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
         let mut pk = [0xDD; 32];
         pk[0] = i as u8;
         let a: SocketAddr = format!("127.0.0.1:{}", 9450 + i).parse().unwrap();
-        pm_b.learn_node_from_gossip_with_hrw_and_work(pk, pk, a, 0, None, 1000)
+        pm_b.learn_node_from_gossip_with_hrw_work_and_auth(pk, pk, a, 0, None, 1000, true)
             .await;
         pm_b.set_first_seen_for_test(
             &pk,
@@ -239,7 +239,7 @@ async fn test_4_1_and_4_2_f2f_feedback_direct_ack_vs_multihop_drop() {
     assert_eq!(pm_b.calculate_network_median_work(), 1000);
 
     // Node A's ticket has work = 10 (< 1000 >> 3 = 125 -> Outdated!)
-    pm_b.learn_node_from_gossip_with_hrw_and_work(pk_a, pk_a, addr_a, 0, None, 10)
+    pm_b.learn_node_from_gossip_with_hrw_work_and_auth(pk_a, pk_a, addr_a, 0, None, 10, true)
         .await;
 
     let cancel_b = CancellationToken::new();
@@ -591,8 +591,8 @@ async fn test_s06_05_u64_floor_median_and_peer_manager_overflow_safety() {
     let pk2 = [2u8; 32];
 
     // Case 1: [1 << 63, 1 << 63]
-    pm.learn_node_from_gossip_with_hrw_and_work(pk1, pk1, addr1, 0, None, 1 << 63).await;
-    pm.learn_node_from_gossip_with_hrw_and_work(pk2, pk2, addr2, 0, None, 1 << 63).await;
+    pm.learn_node_from_gossip_with_hrw_work_and_auth(pk1, pk1, addr1, 0, None, 1 << 63, true).await;
+    pm.learn_node_from_gossip_with_hrw_work_and_auth(pk2, pk2, addr2, 0, None, 1 << 63, true).await;
     pm.set_first_seen_for_test(&pk1, Instant::now() - std::time::Duration::from_secs(25 * 3600)).await;
     pm.set_first_seen_for_test(&pk2, Instant::now() - std::time::Duration::from_secs(25 * 3600)).await;
     assert_eq!(pm.calculate_network_median_work(), 1 << 63);

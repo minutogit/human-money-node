@@ -319,3 +319,281 @@ fn test_s08_11_rolling_quota_edge_cases_and_state_invariance() {
     assert_eq!(max_counter.try_consume(0, u64::MAX, u64::MAX), Ok(u64::MAX));
     assert_eq!(max_counter.try_consume(0, 1, u64::MAX), Err(0));
 }
+
+// ---------------------------------------------------------------------------
+// S08-13: Scaled thermometer accumulation saturation and whole-unit export consistency
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_s08_13_network_thermometer_scaled_accumulation_and_saturation() {
+    use humoco_sim_core::quota::{decay_scaled_ema, MAX_SCALED_USAGE};
+
+    // Case 1: u64::MAX then 1 at equal timestamp (sec = 0)
+    let mut therm1 = NetworkThermometer::new();
+    therm1.record_write_ingress(0, u64::MAX);
+    therm1.record_write_ingress(0, 1);
+    therm1.record_read_ingress(0, u64::MAX);
+    therm1.record_read_ingress(0, 1);
+
+    // Assert bounded saturation (u64::MAX whole units)
+    assert_eq!(
+        therm1.current_write_ema_micro_bj(),
+        u64::MAX,
+        "Raw write EMA after MAX + 1 at sec=0 must saturate to u64::MAX"
+    );
+    assert_eq!(
+        therm1.write_ema_micro_bj_at(0),
+        u64::MAX,
+        "Projected write EMA at sec=0 must equal u64::MAX"
+    );
+    assert_eq!(
+        therm1.current_read_ema_credits(),
+        u64::MAX,
+        "Raw read EMA after MAX + 1 at sec=0 must saturate to u64::MAX"
+    );
+    assert_eq!(
+        therm1.read_ema_credits_at(0),
+        u64::MAX,
+        "Projected read EMA at sec=0 must equal u64::MAX"
+    );
+
+    // Assert exact agreement across raw returns, same-time projections, and checkpoint_emas_at(0)
+    let chk1 = therm1.checkpoint_emas_at(0);
+    assert_eq!(
+        chk1,
+        (u64::MAX, u64::MAX),
+        "checkpoint_emas_at(0) must return (u64::MAX, u64::MAX), not (0, 0)"
+    );
+    assert_eq!(therm1.current_write_ema_micro_bj(), chk1.0);
+    assert_eq!(therm1.current_read_ema_credits(), chk1.1);
+    assert_eq!(therm1.write_ema_micro_bj_at(0), chk1.0);
+    assert_eq!(therm1.read_ema_credits_at(0), chk1.1);
+
+    // Case 2: u64::MAX twice at equal timestamp (sec = 0)
+    let mut therm2 = NetworkThermometer::new();
+    therm2.record_write_ingress(0, u64::MAX);
+    therm2.record_write_ingress(0, u64::MAX);
+    therm2.record_read_ingress(0, u64::MAX);
+    therm2.record_read_ingress(0, u64::MAX);
+
+    assert_eq!(
+        therm2.current_write_ema_micro_bj(),
+        u64::MAX,
+        "Raw write EMA after MAX + MAX at sec=0 must saturate to u64::MAX"
+    );
+    assert_eq!(
+        therm2.write_ema_micro_bj_at(0),
+        u64::MAX,
+        "Projected write EMA after MAX + MAX must equal u64::MAX"
+    );
+    assert_eq!(
+        therm2.current_read_ema_credits(),
+        u64::MAX,
+        "Raw read EMA after MAX + MAX at sec=0 must saturate to u64::MAX"
+    );
+    assert_eq!(
+        therm2.read_ema_credits_at(0),
+        u64::MAX,
+        "Projected read EMA after MAX + MAX must equal u64::MAX"
+    );
+    let chk2 = therm2.checkpoint_emas_at(0);
+    assert_eq!(
+        chk2,
+        (u64::MAX, u64::MAX),
+        "checkpoint_emas_at(0) must return (u64::MAX, u64::MAX)"
+    );
+
+    // Case 3: Ordinary fractional precision preserved below saturation
+    let mut therm3 = NetworkThermometer::new();
+    therm3.record_write_ingress(0, 10_000);
+    therm3.record_read_ingress(0, 5_000);
+    assert_eq!(therm3.current_write_ema_micro_bj(), 10_000);
+    assert_eq!(therm3.current_read_ema_credits(), 5_000);
+    assert_eq!(therm3.checkpoint_emas_at(0), (10_000, 5_000));
+
+    // Case 4: Backward-time handling (now_sec < last_update_sec saturates dt to 0 and bounds to MAX_SCALED_USAGE)
+    let mut therm4 = NetworkThermometer::new();
+    therm4.record_write_ingress(100, u64::MAX);
+    therm4.record_read_ingress(100, u64::MAX);
+    // Backward time event at sec = 50 (< 100)
+    therm4.record_write_ingress(50, 100);
+    therm4.record_read_ingress(50, 100);
+    assert_eq!(therm4.current_write_ema_micro_bj(), u64::MAX);
+    assert_eq!(therm4.current_read_ema_credits(), u64::MAX);
+    assert_eq!(therm4.write_ema_micro_bj_at(100), u64::MAX);
+    assert_eq!(therm4.read_ema_credits_at(100), u64::MAX);
+    assert_eq!(therm4.checkpoint_emas_at(100), (u64::MAX, u64::MAX));
+
+    // Case 5: Next decay / checkpoint_emas_at(1) result from saturated state
+    // Must demonstrate continuous monotonic decay from MAX_SCALED_USAGE without discontinuity
+    let mut therm5 = NetworkThermometer::new();
+    therm5.record_write_ingress(0, u64::MAX);
+    therm5.record_write_ingress(0, 1);
+    therm5.record_read_ingress(0, u64::MAX);
+    therm5.record_read_ingress(0, 1);
+
+    let (decayed_write_1, decayed_read_1) = therm5.checkpoint_emas_at(1);
+    let expected_decayed = (decay_scaled_ema(MAX_SCALED_USAGE, 1) >> 32) as u64;
+    assert_eq!(
+        decayed_write_1,
+        expected_decayed,
+        "Write EMA at sec=1 decayed from saturated state must match decay_scaled_ema continuously"
+    );
+    assert_eq!(
+        decayed_read_1,
+        expected_decayed,
+        "Read EMA at sec=1 decayed from saturated state must match decay_scaled_ema continuously"
+    );
+    assert!(
+        decayed_write_1 < u64::MAX,
+        "Decayed write EMA at sec=1 must be strictly less than u64::MAX"
+    );
+    assert!(
+        decayed_read_1 < u64::MAX,
+        "Decayed read EMA at sec=1 must be strictly less than u64::MAX"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// S08-14: Core quota maps retain fractional usage across cleanup threshold
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_s08_14_core_quota_maps_retain_fractional_usage_on_cleanup() {
+    use humoco_sim_core::quota::MAX_TRACKED_NODES;
+
+    // 1. Read map test
+    let mut therm_read = NetworkThermometer::new();
+    let limit = 50_000u64;
+
+    // Insert MAX_TRACKED_NODES (16,384) distinct identities with 1 unit at sec = 0
+    for id in 0..MAX_TRACKED_NODES as u16 {
+        assert_eq!(
+            therm_read.try_consume_read(0, id, 1, limit),
+            Ok(1),
+            "initial consumption for node {id}"
+        );
+    }
+
+    // At sec = 1, verify node 0 has positive scaled usage < 1 whole unit
+    let node0_counter = therm_read
+        .get_node_read_counter(0)
+        .expect("node 0 must exist before cleanup");
+    let node0_scaled_at_1 = node0_counter.usage_scaled_at(1);
+    assert!(
+        node0_scaled_at_1 > 0,
+        "node 0 must have positive scaled usage at sec=1"
+    );
+    assert_eq!(
+        node0_counter.usage_at(1),
+        0,
+        "node 0 whole unit usage at sec=1 is 0"
+    );
+
+    // Unpruned control counter for exact comparison
+    let mut control_counter = RollingQuotaCounter::new();
+    control_counter.try_consume(0, 1, limit).unwrap();
+    let control_res = control_counter.try_consume(1, limit, limit);
+    assert_eq!(
+        control_res,
+        Err(49_999),
+        "control counter must reject limit consumption at sec=1 with 49,999 available"
+    );
+
+    // Trigger map maintenance by adding a new identity at sec = 1
+    let new_id = MAX_TRACKED_NODES as u16;
+    assert_eq!(
+        therm_read.try_consume_read(1, new_id, 1, limit),
+        Ok(1),
+        "new identity consumption triggers cleanup"
+    );
+
+    // Assert that identity 0 remains in the map (is NOT deleted!)
+    assert!(
+        therm_read.get_node_read_counter(0).is_some(),
+        "node 0 must NOT be purged from read map while it has positive scaled usage"
+    );
+
+    // Assert a 50,000-unit request under limit 50,000 at sec = 1 for identity 0 returns Err(49_999)
+    let res = therm_read.try_consume_read(1, 0, limit, limit);
+    assert_eq!(
+        res,
+        Err(49_999),
+        "node 0 must be rejected with available == 49,999 (matching control counter), NOT Ok(50,000)"
+    );
+
+    // Verify eventual removal once genuine scaled usage decays to exact 0
+    // 65 half-lives = 65 * 86_400 seconds
+    let far_future_sec = 1 + 65 * 86_400;
+    assert_eq!(
+        therm_read
+            .get_node_read_counter(0)
+            .unwrap()
+            .usage_scaled_at(far_future_sec),
+        0,
+        "node 0 scaled usage must decay to exact 0 in far future"
+    );
+
+    // Adding another new identity at far_future_sec triggers cleanup
+    let far_id = (MAX_TRACKED_NODES + 1) as u16;
+    assert_eq!(
+        therm_read.try_consume_read(far_future_sec, far_id, 1, limit),
+        Ok(1)
+    );
+    // Node 0 should now be pruned since its scaled usage is exact 0
+    assert!(
+        therm_read.get_node_read_counter(0).is_none(),
+        "node 0 must be purged once its scaled usage is genuinely 0"
+    );
+
+    // 2. Write map test (try_consume_lock)
+    let mut therm_write = NetworkThermometer::new();
+
+    for id in 0..MAX_TRACKED_NODES as u16 {
+        assert_eq!(
+            therm_write.try_consume_lock(0, id, 1, limit),
+            Ok(1),
+            "initial write consumption for node {id}"
+        );
+    }
+
+    assert!(
+        therm_write.get_node_write_counter(0).unwrap().usage_scaled_at(1) > 0
+    );
+    assert_eq!(
+        therm_write.get_node_write_counter(0).unwrap().usage_at(1),
+        0
+    );
+
+    // Trigger cleanup with new identity at sec = 1
+    assert_eq!(
+        therm_write.try_consume_lock(1, new_id, 1, limit),
+        Ok(1),
+        "new identity write consumption triggers cleanup"
+    );
+
+    // Assert that identity 0 remains in the map (is NOT deleted!)
+    assert!(
+        therm_write.get_node_write_counter(0).is_some(),
+        "node 0 must NOT be purged from write map while it has positive scaled usage"
+    );
+
+    // Assert a 50,000-unit request under limit 50,000 at sec = 1 for identity 0 returns Err(49_999)
+    let res_write = therm_write.try_consume_lock(1, 0, limit, limit);
+    assert_eq!(
+        res_write,
+        Err(49_999),
+        "node 0 must be rejected on write with available == 49,999, NOT Ok(50,000)"
+    );
+
+    // Eventual removal at far future
+    assert_eq!(
+        therm_write.try_consume_lock(far_future_sec, far_id, 1, limit),
+        Ok(1)
+    );
+    assert!(
+        therm_write.get_node_write_counter(0).is_none(),
+        "node 0 must be purged from write map once its scaled usage is genuinely 0"
+    );
+}
+

@@ -22,7 +22,16 @@ pub fn u64_floor_median(a: u64, b: u64) -> u64 {
 pub struct PersistedTicketState {
     pub age: Duration,
     pub admission_qualified: bool,
+    pub last_seen_ms: u64,
 }
+
+/// Spec 07 §4 / INV-0705: 60-day remote metadata retention (5_184_000_000 ms).
+pub const REMOTE_METADATA_RETENTION_MS: u64 = 60 * 24 * 3600 * 1000;
+pub const REMOTE_METADATA_RETENTION: Duration = Duration::from_millis(REMOTE_METADATA_RETENTION_MS);
+
+/// Spec 07 §4 / INV-0705: 1-year direct friend metadata retention (31_536_000_000 ms).
+pub const DIRECT_FRIEND_RETENTION_MS: u64 = 365 * 24 * 3600 * 1000;
+pub const DIRECT_FRIEND_RETENTION: Duration = Duration::from_millis(DIRECT_FRIEND_RETENTION_MS);
 
 pub const DEFAULT_BASE_BACKOFF_MS: u64 = 500;
 pub const DEFAULT_MAX_BACKOFF_MS: u64 = 30_000;
@@ -189,6 +198,7 @@ pub struct KnownNodeInfo {
     pub(crate) latest_obs_hour: Option<u64>,
     pub(crate) obs_24h_mask: u32,
     pub(crate) initial_admission_qualified: bool,
+    pub last_seen_ms: u64,
     pub last_write_evidence: Option<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
     pub last_read_evidence: Option<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
 }
@@ -226,6 +236,7 @@ impl KnownNodeInfo {
             latest_obs_hour: None,
             obs_24h_mask: 0,
             initial_admission_qualified: false,
+            last_seen_ms: 0,
             last_write_evidence: None,
             last_read_evidence: None,
         }
@@ -258,6 +269,7 @@ impl KnownNodeInfo {
             latest_obs_hour: None,
             obs_24h_mask: 0,
             initial_admission_qualified: false,
+            last_seen_ms: 0,
             last_write_evidence: None,
             last_read_evidence: None,
         }
@@ -359,6 +371,25 @@ impl KnownNodeInfo {
         self.observed_age() < self.incubation_duration
     }
 
+    /// Returns the 24-slot observation mask aged to the specified current protocol hour (Spec 07 / Spec 11).
+    pub fn aged_obs_24h_mask(&self, current_hour: u64) -> u32 {
+        match self.latest_obs_hour {
+            None => 0,
+            Some(latest) => {
+                if current_hour > latest {
+                    let delta = current_hour - latest;
+                    if delta >= 24 {
+                        0
+                    } else {
+                        (self.obs_24h_mask << delta) & 0x00FF_FFFF
+                    }
+                } else {
+                    self.obs_24h_mask & 0x00FF_FFFF
+                }
+            }
+        }
+    }
+
     /// Records an authenticated hourly observation using approved network time.
     /// Canonical hour slot = obs_ms / 3_600_000.
     pub fn record_hourly_observation(&mut self, obs_ms: u64, is_simulation: bool) {
@@ -419,13 +450,26 @@ impl KnownNodeInfo {
         false
     }
 
+    /// Checks if initial admission is qualified evaluated at an explicit current protocol hour (S06-09).
+    pub fn is_initial_admission_qualified_at_hour(&self, current_hour: u64) -> bool {
+        if self.incubation_duration <= SIM_HRW_INCUBATION_DURATION {
+            return self.observed_age() >= self.incubation_duration;
+        }
+        if self.observed_age() < self.incubation_duration {
+            return false;
+        }
+        if self.initial_admission_qualified {
+            return true;
+        }
+        self.aged_obs_24h_mask(current_hour).count_ones() >= 8
+    }
+
     /// Checks if initial admission has been qualified (latched per active hrw_routing_id).
     pub fn is_initial_admission_qualified(&self) -> bool {
         if self.incubation_duration <= SIM_HRW_INCUBATION_DURATION {
             return self.observed_age() >= self.incubation_duration;
         }
-        self.observed_age() >= self.incubation_duration
-            && (self.initial_admission_qualified || self.obs_24h_mask.count_ones() >= 8)
+        self.observed_age() >= self.incubation_duration && self.initial_admission_qualified
     }
 
     /// Is gossip presence still fresh relative to `now` (heartbeat seen within `PRESENCE_FRESHNESS_TIMEOUT`)?
@@ -437,6 +481,11 @@ impl KnownNodeInfo {
     /// Stale ghosts must not inflate `N_active` for the Provisional -> Final transition.
     pub fn is_presence_fresh(&self) -> bool {
         self.is_presence_fresh_at(Instant::now())
+    }
+
+    /// May node be used for HRW scoring evaluated at an explicit protocol hour?
+    pub fn is_hrw_eligible_at_hour(&self, current_hour: u64) -> bool {
+        !self.is_immature() && self.is_initial_admission_qualified_at_hour(current_hour)
     }
 
     /// May node be used for HRW scoring? (ACTIVE, not IMMATURE, and qualified for initial admission)
@@ -1313,6 +1362,24 @@ impl PeerManager {
         prior_age: Duration,
         admission_qualified: bool,
     ) {
+        self.seed_persisted_ticket_state_with_last_seen(
+            node_pubkey,
+            hrw_routing_id,
+            prior_age,
+            admission_qualified,
+            self.net_time_ms(),
+        );
+    }
+
+    /// Restores a previously persisted maturation age, qualification, and presence timestamp for `(node_pubkey, hrw_routing_id)` (INV-0705).
+    pub fn seed_persisted_ticket_state_with_last_seen(
+        &self,
+        node_pubkey: [u8; 32],
+        hrw_routing_id: [u8; 32],
+        prior_age: Duration,
+        admission_qualified: bool,
+        last_seen_ms: u64,
+    ) {
         let is_shortcut = hrw_routing_id == *blake3::hash(&node_pubkey).as_bytes()
             || hrw_routing_id == node_pubkey
             || hrw_routing_id == [0u8; 32];
@@ -1324,6 +1391,7 @@ impl PeerManager {
             PersistedTicketState {
                 age: prior_age,
                 admission_qualified,
+                last_seen_ms,
             },
         );
     }
@@ -1346,12 +1414,37 @@ impl PeerManager {
         }
     }
 
-    /// Snapshots active qualified `(node_pubkey, hrw_routing_id)` pairs for periodic persistence.
+    /// Snapshots active qualified `(node_pubkey, hrw_routing_id)` pairs for periodic persistence (S06-09, S06-10).
     pub async fn snapshot_qualified_tickets(&self) -> Vec<([u8; 32], [u8; 32])> {
+        let current_hour = self.net_time_ms() / 3_600_000;
+        let friends = self.f2f_friends.read().await.clone();
+        let now = Instant::now();
+        let now_ms = self.net_time_ms();
         let known = self.known_network_nodes.read().await;
         known
             .iter()
-            .filter(|(_, info)| info.addr.port() != 0 && info.is_initial_admission_qualified())
+            .filter(|(pk, info)| {
+                if info.addr.port() == 0 {
+                    return false;
+                }
+                let is_friend = friends.contains_key(*pk);
+                let limit = if is_friend {
+                    DIRECT_FRIEND_RETENTION
+                } else {
+                    REMOTE_METADATA_RETENTION
+                };
+                let limit_ms = if is_friend {
+                    DIRECT_FRIEND_RETENTION_MS
+                } else {
+                    REMOTE_METADATA_RETENTION_MS
+                };
+                let elapsed_dur = now.saturating_duration_since(info.last_seen);
+                let elapsed_ms = now_ms.saturating_sub(info.last_seen_ms);
+                if elapsed_dur > limit || (info.last_seen_ms > 0 && elapsed_ms > limit_ms) {
+                    return false;
+                }
+                info.is_initial_admission_qualified_at_hour(current_hour)
+            })
             .map(|(pk, info)| (*pk, info.hrw_routing_id))
             .collect()
     }
@@ -2280,62 +2373,13 @@ impl PeerManager {
         ingress_peer: Option<SocketAddr>,
         now: Instant,
     ) {
-        self.learn_node_from_gossip_with_hrw_and_work_at(
-            node_pubkey,
-            hrw_routing_id,
-            addr,
-            hops,
-            ingress_peer,
-            1,
-            now,
-        )
-        .await;
-    }
-
-    /// Semantically decoupled learning method with explicit HRW routing ticket and work score.
-    /// Enforces:
-    /// 1. Minimum admission threshold: work_score >= max(W_min_floor, W_median >> 3).
-    /// 2. Monotonicity Ratchet: On existing nodes, work_score MUST be strictly greater than max(W_active, W_pending).
-    pub async fn learn_node_from_gossip_with_hrw_and_work(
-        &self,
-        node_pubkey: [u8; 32],
-        hrw_routing_id: [u8; 32],
-        addr: SocketAddr,
-        hops: u8,
-        ingress_peer: Option<SocketAddr>,
-        work_score: u64,
-    ) {
-        self.learn_node_from_gossip_with_hrw_and_work_at(
-            node_pubkey,
-            hrw_routing_id,
-            addr,
-            hops,
-            ingress_peer,
-            work_score,
-            Instant::now(),
-        )
-        .await;
-    }
-
-    /// Semantically decoupled learning method with explicit HRW routing ticket, work score, and explicit timestamp.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn learn_node_from_gossip_with_hrw_and_work_at(
-        &self,
-        node_pubkey: [u8; 32],
-        hrw_routing_id: [u8; 32],
-        addr: SocketAddr,
-        hops: u8,
-        ingress_peer: Option<SocketAddr>,
-        work_score: u64,
-        now: Instant,
-    ) {
         self.learn_node_from_gossip_with_hrw_work_and_auth_at(
             node_pubkey,
             hrw_routing_id,
             addr,
             hops,
             ingress_peer,
-            work_score,
+            1,
             hops == 0,
             now,
         )
@@ -2398,23 +2442,55 @@ impl PeerManager {
             return;
         }
 
+        let is_direct_friend = self.is_f2f_friend(&node_pubkey).await;
+        let retention_limit = if is_direct_friend {
+            DIRECT_FRIEND_RETENTION
+        } else {
+            REMOTE_METADATA_RETENTION
+        };
+        let retention_limit_ms = if is_direct_friend {
+            DIRECT_FRIEND_RETENTION_MS
+        } else {
+            REMOTE_METADATA_RETENTION_MS
+        };
+
         let incubation = self.effective_incubation_duration();
         let persisted_state = self
             .persisted_ticket_ages
             .lock()
             .get(&(node_pubkey, hrw_routing_id))
-            .copied()
-            .unwrap_or(PersistedTicketState {
-                age: Duration::ZERO,
-                admission_qualified: false,
-            });
-        let prior_age = persisted_state.age;
-        let initial_admission_qualified =
-            persisted_state.admission_qualified && prior_age >= incubation;
+            .copied();
+        let (prior_age, initial_admission_qualified) = if let Some(ps) = persisted_state {
+            let elapsed_ms = self.net_time_ms().saturating_sub(ps.last_seen_ms);
+            if elapsed_ms > retention_limit_ms {
+                self.persisted_ticket_ages.lock().remove(&(node_pubkey, hrw_routing_id));
+                (Duration::ZERO, false)
+            } else {
+                (ps.age, ps.admission_qualified && ps.age >= incubation)
+            }
+        } else {
+            (Duration::ZERO, false)
+        };
 
         let (was_absent_or_stale, trigger_sync) = {
             let mut nodes = self.known_network_nodes.write().await;
             if let Some(entry) = nodes.get_mut(&node_pubkey) {
+                let elapsed_since_last_seen = now.saturating_duration_since(entry.last_seen);
+                let elapsed_ms = self.net_time_ms().saturating_sub(entry.last_seen_ms);
+                let is_dormant_expired = elapsed_since_last_seen > retention_limit
+                    || (entry.last_seen_ms > 0 && elapsed_ms > retention_limit_ms);
+
+                if is_dormant_expired {
+                    // Reset dormant admission history per Spec 07 §4 / INV-0705:
+                    // Returning remote identity must re-accumulate newcomer observations
+                    entry.first_seen = now;
+                    entry.pre_boot_age = Duration::ZERO;
+                    entry.initial_admission_qualified = false;
+                    entry.latest_obs_hour = None;
+                    entry.obs_24h_mask = 0;
+                    self.persisted_ticket_ages.lock().remove(&(node_pubkey, hrw_routing_id));
+                }
+
                 let stale = now.saturating_duration_since(entry.last_seen) >= PRESENCE_FRESHNESS_TIMEOUT;
                 entry.incubation_duration = incubation;
                 if entry.addr.port() == 0 && entry.work_score == 0 {
@@ -2448,6 +2524,7 @@ impl PeerManager {
                     }
                 }
                 entry.last_seen = now;
+                entry.last_seen_ms = self.net_time_ms();
 
                 if entry.hrw_routing_id != hrw_routing_id {
                     // Monotonicity Ratchet: W_new MUST be strictly greater than max(W_active, W_pending)
@@ -2505,6 +2582,7 @@ impl PeerManager {
                         latest_obs_hour: None,
                         obs_24h_mask: 0,
                         initial_admission_qualified,
+                        last_seen_ms: self.net_time_ms(),
                         last_write_evidence: None,
                         last_read_evidence: None,
                     },
@@ -2530,13 +2608,14 @@ impl PeerManager {
         new_hrw_routing_id: [u8; 32],
         addr: SocketAddr,
     ) {
-        self.learn_node_from_gossip_with_hrw_and_work(
+        self.learn_node_from_gossip_with_hrw_work_and_auth(
             node_pubkey,
             new_hrw_routing_id,
             addr,
             0,
             None,
             1,
+            true,
         )
         .await;
     }
@@ -2549,13 +2628,14 @@ impl PeerManager {
         addr: SocketAddr,
         work_score: u64,
     ) {
-        self.learn_node_from_gossip_with_hrw_and_work(
+        self.learn_node_from_gossip_with_hrw_work_and_auth(
             node_pubkey,
             new_hrw_routing_id,
             addr,
             0,
             None,
             work_score,
+            true,
         )
         .await;
     }
@@ -2662,11 +2742,12 @@ impl PeerManager {
         }
     }
 
-    /// Checks if node is HRW-eligible (ACTIVE, not IMMATURE).
+    /// Checks if node is HRW-eligible (ACTIVE, not IMMATURE, and qualified at current protocol hour).
     pub async fn is_hrw_eligible(&self, node_pubkey: &[u8; 32]) -> bool {
+        let current_hour = self.net_time_ms() / 3_600_000;
         let nodes = self.known_network_nodes.read().await;
         if let Some(entry) = nodes.get(node_pubkey) {
-            entry.is_hrw_eligible()
+            entry.is_hrw_eligible_at_hour(current_hour)
         } else {
             false
         }
@@ -3293,12 +3374,13 @@ impl PeerManager {
 
     /// Mature, passively present admitted identities. RPC malus is diagnostic.
     pub async fn active_known_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
+        let current_hour = self.net_time_ms() / 3_600_000;
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
         known
             .into_iter()
             .filter(|(pk, info)| {
-                info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk)
+                info.is_hrw_eligible_at_hour(current_hour) && info.is_presence_fresh() && !banned.contains(pk)
             })
             .map(|(pk, info)| (pk, info.addr))
             .collect()
@@ -3306,12 +3388,13 @@ impl PeerManager {
 
     /// HRW tickets of the same qualified identity set used for committee selection.
     pub async fn active_hrw_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
+        let current_hour = self.net_time_ms() / 3_600_000;
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
         known
             .into_iter()
             .filter(|(pk, info)| {
-                info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(pk)
+                info.is_hrw_eligible_at_hour(current_hour) && info.is_presence_fresh() && !banned.contains(pk)
             })
             .map(|(_, info)| (info.hrw_routing_id, info.addr))
             .collect()
@@ -3347,12 +3430,13 @@ impl PeerManager {
         usize,
     ) {
         use humoco_sim_core::types::{select_shard_committee, CommitteeMember};
+        let current_hour = self.net_time_ms() / 3_600_000;
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
         let mut endpoints = HashMap::new();
         for (pk, info) in &known {
             if *pk != self_pubkey
-                && info.is_hrw_eligible()
+                && info.is_hrw_eligible_at_hour(current_hour)
                 && info.is_presence_fresh()
                 && !banned.contains(pk)
             {
@@ -3376,7 +3460,7 @@ impl PeerManager {
         let self_mature = if !self_has_valid_ticket {
             false
         } else if let Some(info) = known.get(&self_pubkey) {
-            info.hrw_routing_id == self_hrw && info.is_hrw_eligible()
+            info.hrw_routing_id == self_hrw && info.is_hrw_eligible_at_hour(current_hour)
         } else if let Ok(mut observation) = self.local_ticket_observation.lock() {
             match *observation {
                 Some((pk, hrw, since, prior_age)) if pk == self_pubkey && hrw == self_hrw => {
@@ -3391,6 +3475,7 @@ impl PeerManager {
                         .unwrap_or(PersistedTicketState {
                             age: Duration::ZERO,
                             admission_qualified: false,
+                            last_seen_ms: 0,
                         });
                     *observation = Some((self_pubkey, self_hrw, Instant::now(), prior_state.age));
                     prior_state.age >= required_incubation
@@ -3475,14 +3560,15 @@ impl PeerManager {
             || (*identity.hrw_routing_id() != *blake3::hash(&local).as_bytes()
                 && *identity.hrw_routing_id() != local
                 && *identity.hrw_routing_id() != [0u8; 32]);
+        let current_hour = self.net_time_ms() / 3_600_000;
         let mut members = Vec::new();
         for (key, info) in known.iter() {
             let eligible = if *key == local {
                 local_has_valid_ticket
                     && info.hrw_routing_id == *identity.hrw_routing_id()
-                    && info.is_hrw_eligible()
+                    && info.is_hrw_eligible_at_hour(current_hour)
             } else {
-                info.is_hrw_eligible() && info.is_presence_fresh()
+                info.is_hrw_eligible_at_hour(current_hour) && info.is_presence_fresh()
             };
             if eligible && !banned.contains(key) {
                 if members.len() >= humoco_proto::mesh::MAX_MESH_MEMBERS {
@@ -3737,10 +3823,11 @@ impl PeerManager {
         let Ok(banned) = self.banned_nodes.try_read() else {
             return 0;
         };
+        let current_hour = self.net_time_ms() / 3_600_000;
         let remote_count = known
             .iter()
             .filter(|(pk, info)| {
-                info.is_hrw_eligible() && info.is_presence_fresh() && !banned.contains(*pk)
+                info.is_hrw_eligible_at_hour(current_hour) && info.is_presence_fresh() && !banned.contains(*pk)
             })
             .count();
         remote_count + usize::from(self.local_ticket_is_mature())
@@ -3831,12 +3918,42 @@ impl PeerManager {
             .store(anchor_ms, Ordering::Relaxed);
     }
 
-    /// Test helper: overrides last_seen to simulate stale presence ghosts.
+    /// Test helper: overrides last_seen to simulate stale presence ghosts (INV-0705).
     pub async fn set_last_seen_for_test(&self, node_pubkey: &[u8; 32], last_seen: Instant) {
         let mut nodes = self.known_network_nodes.write().await;
         if let Some(entry) = nodes.get_mut(node_pubkey) {
             entry.last_seen = last_seen;
+            let elapsed = Instant::now().saturating_duration_since(last_seen);
+            entry.last_seen_ms = self.net_time_ms().saturating_sub(elapsed.as_millis() as u64);
         }
+    }
+
+    /// Returns a snapshot of direct F2F friend public keys.
+    pub async fn f2f_friends_snapshot(&self) -> std::collections::HashSet<[u8; 32]> {
+        self.f2f_friends.read().await.keys().cloned().collect()
+    }
+
+    /// Prunes dormant known nodes that exceed their respective retention windows (Spec 07 §4 / INV-0705).
+    pub async fn prune_dormant_known_nodes(&self, now: Instant) {
+        let friends = self.f2f_friends.read().await.clone();
+        let now_ms = self.net_time_ms();
+        let mut nodes = self.known_network_nodes.write().await;
+        nodes.retain(|pk, info| {
+            let is_friend = friends.contains_key(pk);
+            let limit = if is_friend {
+                DIRECT_FRIEND_RETENTION
+            } else {
+                REMOTE_METADATA_RETENTION
+            };
+            let limit_ms = if is_friend {
+                DIRECT_FRIEND_RETENTION_MS
+            } else {
+                REMOTE_METADATA_RETENTION_MS
+            };
+            let elapsed_dur = now.saturating_duration_since(info.last_seen);
+            let elapsed_ms = now_ms.saturating_sub(info.last_seen_ms);
+            elapsed_dur <= limit && (info.last_seen_ms == 0 || elapsed_ms <= limit_ms)
+        });
     }
 
     /// Autonomous healing: decrements penalty counter of all registered peers by 1.

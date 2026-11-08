@@ -3857,3 +3857,337 @@ async fn test_s05_14_real_quic_gateway_restart_without_pre_restart_accounting_dr
     server_transport.close();
 }
 
+// ===========================================================================
+// S08-14: Fractional Quota Retention Across Cleanup Threshold & Real-QUIC
+// ===========================================================================
+
+#[tokio::test]
+async fn test_s08_14_tier_controller_http_and_p2p_maps_cleanup_retention() {
+    use humoco_sim_core::quota::MAX_WHALE_MULTIPLIER;
+
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s08_14_tier_maps.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let tc = TierController::new(storage, pow);
+
+    // 1. HTTP/controller read path (evaluate_read_quota_with_time on thermometer)
+    // Populate 16,384 distinct client IDs with 1 credit at t = 0
+    for id in 0..16_384u16 {
+        tc.evaluate_read_quota_with_time(id, 1, 1.0, Some(0))
+            .expect("initial client read consumption");
+    }
+
+    // At t = 1000ms, client 16,384 arrives and triggers map maintenance
+    tc.evaluate_read_quota_with_time(16_384, 1, 1.0, Some(1000))
+        .expect("new client read consumption");
+
+    // Client 0 still has positive scaled usage (< 1 credit). Requesting 50,000 under limit 50,000
+    // must be rejected with available == 49,999, NOT Ok(())!
+    let http_res = tc.evaluate_read_quota_with_time(0, 50_000, 1.0, Some(1000));
+    assert!(
+        matches!(
+            http_res,
+            Err(IngressError::ReadQuotaExceeded {
+                available: 49_999,
+                required: 50_000,
+            })
+        ),
+        "Client 0 must retain fractional usage after cleanup and reject full limit consumption, got {:?}",
+        http_res
+    );
+
+    // 2. Full-NodePubKey P2P write map (evaluate_node_write_quota)
+    let daily_write_quota = tc.calculate_daily_quota(MAX_WHALE_MULTIPLIER, 1.0);
+    for i in 0..16_384u32 {
+        let mut pk = [0u8; 32];
+        pk[0..4].copy_from_slice(&i.to_le_bytes());
+        tc.evaluate_node_write_quota(&pk, 1, 0)
+            .expect("initial p2p node write consumption");
+    }
+
+    // Trigger cleanup with new peer at t = 1000ms
+    let mut new_write_pk = [0u8; 32];
+    new_write_pk[0..4].copy_from_slice(&16_384u32.to_le_bytes());
+    tc.evaluate_node_write_quota(&new_write_pk, 1, 1000)
+        .expect("new p2p node write consumption");
+
+    let mut pk0 = [0u8; 32];
+    pk0[0..4].copy_from_slice(&0u32.to_le_bytes());
+    let write_res = tc.evaluate_node_write_quota(&pk0, daily_write_quota, 1000);
+    assert!(
+        matches!(
+            write_res,
+            Err(IngressError::QuotaExceeded {
+                available,
+                required,
+            }) if available == daily_write_quota - 1 && required == daily_write_quota
+        ),
+        "P2P write peer 0 must retain fractional usage after cleanup and reject full daily quota, got {:?}",
+        write_res
+    );
+
+    // Far future decay: after 65 half-lives, scaled usage is genuinely 0
+    let far_future_ms = (65 * 86_400 + 1) * 1000;
+    let mut far_write_pk = [0u8; 32];
+    far_write_pk[0..4].copy_from_slice(&16_385u32.to_le_bytes());
+    tc.evaluate_node_write_quota(&far_write_pk, 1, far_future_ms)
+        .expect("far future cleanup trigger");
+    // Peer 0 is now genuinely zeroed and reclaimed, so consuming daily_write_quota succeeds
+    assert!(
+        tc.evaluate_node_write_quota(&pk0, daily_write_quota, far_future_ms).is_ok(),
+        "P2P write peer 0 must be reclaimed once scaled usage has decayed to exact 0"
+    );
+
+    // 3. Full-NodePubKey P2P read map (evaluate_node_read_quota)
+    let daily_read_quota = tc.calculate_daily_read_quota(MAX_WHALE_MULTIPLIER, 1.0);
+    for i in 0..16_384u32 {
+        let mut pk = [0x55u8; 32];
+        pk[0..4].copy_from_slice(&i.to_le_bytes());
+        tc.evaluate_node_read_quota(&pk, 1, 0)
+            .expect("initial p2p node read consumption");
+    }
+
+    // Trigger cleanup with new peer at t = 1000ms
+    let mut new_read_pk = [0x55u8; 32];
+    new_read_pk[0..4].copy_from_slice(&16_384u32.to_le_bytes());
+    tc.evaluate_node_read_quota(&new_read_pk, 1, 1000)
+        .expect("new p2p node read consumption");
+
+    let mut r_pk0 = [0x55u8; 32];
+    r_pk0[0..4].copy_from_slice(&0u32.to_le_bytes());
+    let read_res = tc.evaluate_node_read_quota(&r_pk0, daily_read_quota, 1000);
+    assert!(
+        matches!(
+            read_res,
+            Err(IngressError::ReadQuotaExceeded {
+                available,
+                required,
+            }) if available == daily_read_quota - 1 && required == daily_read_quota
+        ),
+        "P2P read peer 0 must retain fractional usage after cleanup and reject full daily read quota, got {:?}",
+        read_res
+    );
+
+    // Far future decay
+    let mut far_read_pk = [0x55u8; 32];
+    far_read_pk[0..4].copy_from_slice(&16_385u32.to_le_bytes());
+    tc.evaluate_node_read_quota(&far_read_pk, 1, far_future_ms)
+        .expect("far future read cleanup trigger");
+    assert!(
+        tc.evaluate_node_read_quota(&r_pk0, daily_read_quota, far_future_ms).is_ok(),
+        "P2P read peer 0 must be reclaimed once scaled usage has decayed to exact 0"
+    );
+}
+
+#[tokio::test]
+async fn test_s08_14_quic_receiver_fractional_cleanup_retention() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s08_14_quic.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let server_id = NodeIdentity::generate();
+    let gateway_id = NodeIdentity::generate();
+    let gateway_pubkey = *gateway_id.node_pubkey();
+
+    let server_tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let (engine, _) = DualTierEngine::new(storage.clone());
+    let readiness = Arc::new(ShardReadinessManager::new());
+    for s in 0..=u16::MAX {
+        readiness.mark_shard_ready(s);
+    }
+
+    let server_peer_mgr = Arc::new(PeerManager::new(vec![]));
+    server_peer_mgr.set_simulation_mode(true);
+    let handler = NodeRequestHandler::with_peer_manager(
+        engine,
+        storage.clone(),
+        server_id.clone(),
+        server_peer_mgr.clone(),
+    )
+    .with_readiness_manager(readiness)
+    .with_tier_controller(server_tc.clone());
+
+    let cancel_token = CancellationToken::new();
+
+    let server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        server_peer_mgr.clone(),
+        Arc::new(handler),
+        cancel_token.clone(),
+    )
+    .expect("bind server QUIC");
+    let server_addr = server_transport.local_addr().unwrap();
+    let _server_accept = server_transport.spawn_accept_loop();
+
+    let gw_peer_mgr = Arc::new(PeerManager::new(vec![server_addr]));
+    gw_peer_mgr.set_simulation_mode(true);
+    let gateway_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &gateway_id,
+        gw_peer_mgr.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel_token.clone(),
+    )
+    .expect("bind gateway QUIC");
+    let _gw_accept = gateway_transport.spawn_accept_loop();
+
+    server_peer_mgr
+        .register_f2f_friend(gateway_pubkey, Some(gateway_transport.local_addr().unwrap()))
+        .await;
+    gw_peer_mgr
+        .register_f2f_friend(*server_id.node_pubkey(), Some(server_addr))
+        .await;
+
+    let conn = gateway_transport
+        .connect_peer(server_addr)
+        .await
+        .expect("connect QUIC peer");
+
+    let quic_now_ms = server_peer_mgr.net_time_ms();
+    let daily_read_limit = server_tc.calculate_daily_read_quota(
+        humoco_sim_core::quota::MAX_WHALE_MULTIPLIER,
+        1.0,
+    );
+    assert_eq!(daily_read_limit, 250_000);
+
+    // Populate 16,383 background peers with 1 credit at quic_now_ms
+    for i in 0..16_383u32 {
+        let mut pk = [0xAAu8; 32];
+        pk[0..4].copy_from_slice(&i.to_le_bytes());
+        server_tc
+            .evaluate_node_read_quota(&pk, 1, quic_now_ms)
+            .expect("background peer quota populate");
+    }
+
+    // Exhaust gateway node read quota at quic_now_ms (total entries = 16,384)
+    server_tc
+        .evaluate_node_read_quota(&gateway_pubkey, daily_read_limit, quic_now_ms)
+        .expect("initial gateway read consume");
+
+    // Helper closure to send a valid authenticated StatusQuery over real QUIC
+    let send_status_query = |seq: u64, timestamp_ms: u64| {
+        let gt = gateway_transport.clone();
+        let c = conn.clone();
+        let gid = gateway_id.clone();
+        async move {
+            let query_lock_id = [0x77u8; 32];
+            let query_digest = compute_ingress_envelope_digest(
+                humoco_sim_core::types::NetworkId::default(),
+                &gateway_pubkey,
+                0,
+                0,
+                timestamp_ms,
+                0,
+                0,
+                0,
+                true,
+                &query_lock_id,
+            );
+            let query_sig = gid.signing_key().sign(&query_digest).to_bytes();
+            let status_payload =
+                bincode::serialize(&humoco_node::network::framing::StatusQueryPayload {
+                    lock_id: query_lock_id,
+                    parent_lock: [0x77u8; 32],
+                    shard_id: 1,
+                    sender_pubkey: gateway_pubkey,
+                    declared_write_ema_micro_bj: 0,
+                    current_read_ema_credits: 0,
+                    timestamp_ms,
+                    sender_signature: query_sig,
+                })
+                .unwrap();
+            let status_hdr = WireHeader::new(
+                MsgType::StatusQuery as u16,
+                seq,
+                0,
+                0,
+                status_payload.len() as u32,
+            );
+            let (resp_hdr, _) = gt
+                .send_request(&c, &status_hdr, &status_payload)
+                .await
+                .expect("send QUIC status query");
+            resp_hdr
+        }
+    };
+
+    // Advance 1 second: ~1.88 credits decayed
+    server_peer_mgr.clock().advance_time_for_test(1_000);
+    gw_peer_mgr.clock().advance_time_for_test(1_000);
+    let t1 = server_peer_mgr.net_time_ms();
+
+    // Query 1 consumes 1 credit, leaving < 1 credit available (~0.88)
+    let resp_1 = send_status_query(1, t1).await;
+    assert_eq!(
+        resp_1.flags & FLAG_QUOTA_EXCEEDED,
+        0,
+        "First query after 1s must be accepted within decayed capacity"
+    );
+
+    // Trigger cleanup threshold with a new peer at t1
+    let new_pk = [0xBBu8; 32];
+    server_tc
+        .evaluate_node_read_quota(&new_pk, 1, t1)
+        .expect("new peer read consume triggering cleanup");
+
+    // Background peer 0 had 1 credit at t=0, so at t1 it has positive scaled usage (< 1 credit).
+    // In pre-fix code, background peer 0 was erroneously pruned because usage_at was 0!
+    // Assert background peer 0 is retained and rejects full daily read quota
+    let mut bg0 = [0xAAu8; 32];
+    bg0[0..4].copy_from_slice(&0u32.to_le_bytes());
+    let bg0_res = server_tc.evaluate_node_read_quota(&bg0, daily_read_limit, t1);
+    assert!(
+        matches!(
+            bg0_res,
+            Err(IngressError::ReadQuotaExceeded {
+                available,
+                required,
+            }) if available == daily_read_limit - 1 && required == daily_read_limit
+        ),
+        "Background peer 0 must NOT be evicted by cleanup while positive scaled usage remains, got {:?}",
+        bg0_res
+    );
+
+    // Ensure any remaining whole credits for gateway_pubkey are exhausted so < 1 credit remains:
+    let now_t = server_peer_mgr.net_time_ms();
+    match server_tc.evaluate_node_read_quota(&gateway_pubkey, daily_read_limit, now_t) {
+        Err(IngressError::ReadQuotaExceeded { available, .. }) if available > 0 => {
+            let _ = server_tc.evaluate_node_read_quota(&gateway_pubkey, available, now_t);
+        }
+        _ => {}
+    }
+
+    // Now send target peer's request over real QUIC when < 1 whole credit remains:
+    let resp_2 = send_status_query(2, now_t).await;
+    assert_eq!(
+        resp_2.flags & FLAG_QUOTA_EXCEEDED,
+        FLAG_QUOTA_EXCEEDED,
+        "Second query over real QUIC must receive FLAG_QUOTA_EXCEEDED when remaining fractional capacity is < 1 credit"
+    );
+
+    // Verify zero identity ban and zero presence/peer-failure penalty
+    let peer = server_peer_mgr
+        .get_peer(&gateway_transport.local_addr().unwrap())
+        .await
+        .expect("peer present");
+    assert_eq!(
+        peer.missing_count, 0,
+        "missing_count must be unchanged (0) on quota exceeded"
+    );
+    assert!(
+        !peer.is_suspended(),
+        "peer must not be suspended on quota exceeded"
+    );
+    assert!(
+        !server_peer_mgr.is_banned(&gateway_pubkey).await,
+        "peer must not be banned on quota exceeded"
+    );
+
+    cancel_token.cancel();
+    server_transport.close();
+    gateway_transport.close();
+}
+
+

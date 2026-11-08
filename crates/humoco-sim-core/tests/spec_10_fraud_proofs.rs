@@ -466,3 +466,522 @@ fn test_s07_10_physical_time_ema_decay_bounds_and_symmetry() {
     assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p1, &p2_zero));
     assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &p2_zero, &p1));
 }
+
+/// S07-12: Lawful composed Q32 decay must never be classified as first-party fraud
+#[test]
+fn test_s07_12_composed_q32_decay_honest_reproduction_not_fraud() {
+    use humoco_sim_core::quota::NetworkThermometer;
+
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x99; 32]);
+
+    // Exact S07-12 reproduction vector from finding:
+    // 1. T = 100_000s, write_ingress = 1_000_000_000_000
+    let mut therm = NetworkThermometer::new();
+    therm.record_write_ingress(100_000, 1_000_000_000_000);
+    let (write_ema_1, read_ema_1) = therm.checkpoint_emas_at(100_000);
+    assert_eq!(write_ema_1, 1_000_000_000_000);
+    assert_eq!(read_ema_1, 0);
+
+    let env1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1,
+        100_000_000,
+        write_ema_1,
+        read_ema_1,
+        1,
+        false,
+        [0x10; 32],
+    );
+
+    // 2. Unobserved intermediate write ingress at 101_350s (seq 2)
+    therm.record_write_ingress(101_350, 1);
+
+    // 3. Observed write ingress at 101_891s (seq 3)
+    therm.record_write_ingress(101_891, 1);
+    let (write_ema_3, read_ema_3) = therm.checkpoint_emas_at(101_891);
+    assert_eq!(write_ema_3, 984_957_739_474);
+    assert_eq!(read_ema_3, 0);
+
+    let env3 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        3,
+        101_891_000,
+        write_ema_3,
+        read_ema_3,
+        1,
+        false,
+        [0x30; 32],
+    );
+
+    // Prior to S07-12 fix, direct decay gives 984_957_739_477, min_write gives 984_957_739_476,
+    // which falsely flags genuine honest envelopes as fraud in BOTH orders!
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env1, &env3),
+        "S07-12: Lawful composed decay in (env1, env3) must NOT be fraud"
+    );
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env3, &env1),
+        "S07-12: Lawful composed decay in (env3, env1) must NOT be fraud"
+    );
+
+    let proof_13 = FraudProofPayload::new_ingress_counter_conflict(env1.clone(), env3.clone());
+    assert!(!proof_13.verify_network(NetworkId::Mainnet));
+    let proof_31 = FraudProofPayload::new_ingress_counter_conflict(env3, env1);
+    assert!(!proof_31.verify_network(NetworkId::Mainnet));
+}
+
+/// S07-12: Both write and read EMA counters with composed decay
+#[test]
+fn test_s07_12_composed_decay_read_ema_counters() {
+    use humoco_sim_core::quota::NetworkThermometer;
+
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x98; 32]);
+
+    let mut therm = NetworkThermometer::new();
+    therm.record_read_ingress(100_000, 10_000_000_000);
+    let (write_1, read_1) = therm.checkpoint_emas_at(100_000);
+    assert_eq!(read_1, 10_000_000_000);
+
+    let env1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1,
+        100_000_000,
+        write_1,
+        read_1,
+        1,
+        true,
+        [0x11; 32],
+    );
+
+    // Intermediate read events:
+    therm.record_read_ingress(101_350, 1);
+    therm.record_read_ingress(101_891, 1);
+    let (write_3, read_3) = therm.checkpoint_emas_at(101_891);
+
+    let env3 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        3,
+        101_891_000,
+        write_3,
+        read_3,
+        1,
+        true,
+        [0x33; 32],
+    );
+
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env1, &env3));
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env3, &env1));
+}
+
+/// S07-12: Table-boundary segments, exact knots, multi-hour jumps, and multi-day windows
+#[test]
+fn test_s07_12_table_boundary_knots_and_multi_day() {
+    use humoco_sim_core::quota::NetworkThermometer;
+
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x97; 32]);
+
+    let mut therm = NetworkThermometer::new();
+    therm.record_write_ingress(0, 500_000_000_000);
+    let (w0, r0) = therm.checkpoint_emas_at(0);
+
+    let env0 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1,
+        0,
+        w0,
+        r0,
+        100,
+        false,
+        [0x01; 32],
+    );
+
+    // Sub-segment 500s, then jump to exact knot at 1350s:
+    therm.record_write_ingress(500, 10);
+    therm.record_write_ingress(1350, 10);
+    // Sub-segment 2000s, then jump to exact knot at 2700s:
+    therm.record_write_ingress(2000, 10);
+    therm.record_write_ingress(2700, 10);
+    // Multi-hour jumps (12h = 43200s, 24h = 86400s) and multi-day (3 days = 259200s):
+    therm.record_write_ingress(43_200, 10);
+    therm.record_write_ingress(86_400, 10);
+    therm.record_write_ingress(259_200, 10);
+    let (w_final, r_final) = therm.checkpoint_emas_at(259_200);
+
+    let env_final = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        8,
+        259_200_000,
+        w_final,
+        r_final,
+        100,
+        false,
+        [0x08; 32],
+    );
+
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env0, &env_final));
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_final, &env0));
+}
+
+/// S07-12: Multiple hidden intermediate checkpoints and seq-zero read/status updates
+#[test]
+fn test_s07_12_hidden_intermediate_checkpoints_and_seq_zero() {
+    use humoco_sim_core::quota::NetworkThermometer;
+
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x96; 32]);
+
+    let mut therm = NetworkThermometer::new();
+    therm.record_write_ingress(10_000, 2_000_000_000_000);
+    let (w_init, r_init) = therm.checkpoint_emas_at(10_000);
+
+    let env_init = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1,
+        10_000_000,
+        w_init,
+        r_init,
+        50,
+        false,
+        [0xA1; 32],
+    );
+
+    // Simulate 50 intermediate hidden updates: write events and seq=0 status checkpoints
+    let mut current_sec = 10_000;
+    for i in 1..=50 {
+        current_sec += 25; // 25s elapsed per step
+        if i % 2 == 0 {
+            therm.record_write_ingress(current_sec, 5);
+        } else {
+            therm.record_read_ingress(current_sec, 2);
+            therm.checkpoint_emas_at(current_sec); // status checkpoint without write sequence
+        }
+    }
+
+    let (w_end, r_end) = therm.checkpoint_emas_at(current_sec);
+    let env_end = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        26, // only 25 write events occurred
+        current_sec * 1000,
+        w_end,
+        r_end,
+        50,
+        false,
+        [0xA2; 32],
+    );
+
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_init, &env_end));
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_end, &env_init));
+}
+
+/// S07-12: Large bounded values up to u64::MAX (MAX_SCALED_USAGE whole units)
+#[test]
+fn test_s07_12_large_bounded_values_up_to_u64_max() {
+    use humoco_sim_core::quota::NetworkThermometer;
+
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x95; 32]);
+
+    let mut therm = NetworkThermometer::new();
+    // Ingress maximum bounded whole units (MAX_SCALED_USAGE >> 32 == u64::MAX)
+    therm.record_write_ingress(1_000, u64::MAX);
+    let (w_max, r_max) = therm.checkpoint_emas_at(1_000);
+
+    let env_max = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1,
+        1_000_000,
+        w_max,
+        r_max,
+        100,
+        false,
+        [0xB1; 32],
+    );
+
+    therm.record_write_ingress(2_350, 100);
+    therm.record_write_ingress(2_891, 100);
+    let (w_max_end, r_max_end) = therm.checkpoint_emas_at(2_891);
+
+    let env_max_end = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        3,
+        2_891_000,
+        w_max_end,
+        r_max_end,
+        100,
+        false,
+        [0xB3; 32],
+    );
+
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_max, &env_max_end));
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_max_end, &env_max));
+}
+
+/// S07-12: Network isolation between Mainnet and Testnet
+#[test]
+fn test_s07_12_network_isolation_mainnet_and_testnet() {
+    use humoco_sim_core::quota::NetworkThermometer;
+
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x94; 32]);
+
+    let mut therm = NetworkThermometer::new();
+    therm.record_write_ingress(100_000, 1_000_000_000_000);
+    let (w1, r1) = therm.checkpoint_emas_at(100_000);
+
+    let env1_test = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Testnet,
+        &sk,
+        1,
+        1,
+        100_000_000,
+        w1,
+        r1,
+        1,
+        false,
+        [0xC1; 32],
+    );
+
+    therm.record_write_ingress(101_350, 1);
+    therm.record_write_ingress(101_891, 1);
+    let (w3, r3) = therm.checkpoint_emas_at(101_891);
+
+    let env3_test = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Testnet,
+        &sk,
+        1,
+        3,
+        101_891_000,
+        w3,
+        r3,
+        1,
+        false,
+        [0xC3; 32],
+    );
+
+    // On Testnet:
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Testnet, &env1_test, &env3_test));
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Testnet, &env3_test, &env1_test));
+
+    // Under foreign network Mainnet:
+    assert!(!FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env1_test, &env3_test));
+}
+
+/// S07-12: Positive fraud controls preserved (same-slot fork, blatant under-reporting rollback)
+#[test]
+fn test_s07_12_positive_fraud_controls_preserved() {
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x93; 32]);
+
+    // Control 1: Genuine same-slot sequence fork conflict (same day & seq, different op_hash)
+    let env_fork_a = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        5,
+        100_000_000,
+        500_000,
+        0,
+        10,
+        false,
+        [0xD1; 32],
+    );
+    let env_fork_b = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        5,
+        100_000_010,
+        500_000,
+        0,
+        10,
+        false,
+        [0xD2; 32],
+    );
+    assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_fork_a, &env_fork_b));
+    assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_fork_b, &env_fork_a));
+
+    // Control 2: Blatant impossible under-reporting (rollback to 0 after short interval)
+    let env_adv_zero = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        6,
+        100_001_000, // 1s later
+        0,           // rollback to 0
+        0,
+        10,
+        false,
+        [0xD3; 32],
+    );
+    assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_fork_a, &env_adv_zero));
+    assert!(FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env_adv_zero, &env_fork_a));
+}
+
+/// S07-12: Verify that for all dt in 1..=86_400, decay_scaled_ema factor stays strictly within Q32 constants
+#[test]
+fn test_s07_12_dyadic_secant_slack_bounds_all_seconds() {
+    use humoco_sim_core::quota::decay_scaled_ema;
+
+    let base_scaled = 1u128 << 32;
+    for dt in 1..=86_400u64 {
+        let direct_scaled = decay_scaled_ema(base_scaled, dt);
+        let exact_factor = 2.0f64.powf(-(dt as f64) / 86400.0);
+        let exact_scaled = (exact_factor * ((1u128 << 32) as f64)).round() as i128;
+        let diff_q32 = direct_scaled as i128 - exact_scaled;
+
+        // Due to strictly convex secant interpolation, direct_scaled is >= exact (modulo at most 1 Q32 unit knot under-rounding)
+        assert!(
+            diff_q32 >= -1,
+            "dt={} factor underflow: direct={} exact={} diff={}",
+            dt, direct_scaled, exact_scaled, diff_q32
+        );
+        assert!(
+            diff_q32 <= FraudProofPayload::MAX_DYADIC_SECANT_ERROR_Q32 as i128 + 1,
+            "dt={} exceeded secant error bound: diff={} max={}",
+            dt, diff_q32, FraudProofPayload::MAX_DYADIC_SECANT_ERROR_Q32
+        );
+        assert!(
+            diff_q32 <= FraudProofPayload::MAX_COMPOSITE_DECAY_SLACK_Q32 as i128,
+            "dt={} exceeded composite decay slack: diff={} max={}",
+            dt, diff_q32, FraudProofPayload::MAX_COMPOSITE_DECAY_SLACK_Q32
+        );
+    }
+}
+
+/// S07-12: Integer boundary multi-step test for v1 = 68_500 (secant_slack * v1 ~ 0.999 * 2^32)
+#[test]
+fn test_s07_12_integer_boundary_v1_68500_multi_step() {
+    use humoco_sim_core::quota::NetworkThermometer;
+
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x92; 32]);
+    let mut therm = NetworkThermometer::new();
+
+    let v1 = 68_500u64;
+    therm.record_write_ingress(100_000, v1);
+    let (w1, r1) = therm.checkpoint_emas_at(100_000);
+    assert_eq!(w1, v1);
+
+    let env1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1,
+        100_000_000,
+        w1,
+        r1,
+        1,
+        false,
+        [0x71; 32],
+    );
+
+    // Multi-step decomposition across intermediate knots
+    therm.record_write_ingress(100_675, 1);
+    therm.record_write_ingress(101_350, 1);
+    therm.record_write_ingress(102_025, 1);
+    let (w2, r2) = therm.checkpoint_emas_at(102_025);
+
+    let env2 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        4,
+        102_025_000,
+        w2,
+        r2,
+        1,
+        false,
+        [0x74; 32],
+    );
+
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env1, &env2),
+        "v1=68_500 multi-step (env1, env2) must NOT be flagged as fraud"
+    );
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &env2, &env1),
+        "v1=68_500 multi-step (env2, env1) must NOT be flagged as fraud"
+    );
+}
+
+/// S07-12: Unsequenced envelopes (epoch_seq == 0) with non-zero epoch_day must not trigger false fraud
+#[test]
+fn test_s07_12_unsequenced_epoch_seq_zero_with_positive_epoch_day() {
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x91; 32]);
+
+    // Scenario A: Two distinct unsequenced read/status envelopes on the same epoch_day
+    let read_a = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        0, // unsequenced
+        100_000_000,
+        500_000,
+        10_000,
+        1,
+        true,
+        [0xE1; 32],
+    );
+    let read_b = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        0, // unsequenced
+        100_002_000,
+        499_900,
+        10_001,
+        1,
+        true,
+        [0xE2; 32],
+    );
+
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &read_a, &read_b),
+        "Two unsequenced reads on same day must NOT conflict"
+    );
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &read_b, &read_a),
+        "Two unsequenced reads on same day (reverse) must NOT conflict"
+    );
+
+    // Scenario B: An unsequenced read envelope paired with a sequenced write envelope
+    let write_seq1 = humoco_sim_core::fraud::sign_ingress_evidence_with_key(
+        NetworkId::Mainnet,
+        &sk,
+        1,
+        1, // sequenced
+        100_001_000,
+        500_000,
+        10_000,
+        10,
+        false,
+        [0xE3; 32],
+    );
+
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &read_a, &write_seq1),
+        "Unsequenced read + sequenced write must NOT conflict"
+    );
+    assert!(
+        !FraudProofPayload::check_ingress_conflict(NetworkId::Mainnet, &write_seq1, &read_a),
+        "Sequenced write + unsequenced read must NOT conflict"
+    );
+}
+
+
+

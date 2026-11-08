@@ -455,8 +455,19 @@ async fn test_persisted_ticket_observations_survive_restart_while_new_tickets_in
             .expect("persist ticket observations");
         assert_eq!(inserted, 4);
 
-        // Re-recording with a newer timestamp must preserve the original first_seen_ms and latch qualified flag.
-        let inserted_again = storage
+        // Re-recording with a newer timestamp must update last_seen_ms while preserving the original first_seen_ms and latched qualified flag.
+        let updated = storage
+            .record_ticket_observations(&[(
+                *qualified_peer.node_pubkey(),
+                *qualified_peer.hrw_routing_id(),
+                now_ms,
+                false,
+            )])
+            .expect("update last_seen");
+        assert_eq!(updated, 1);
+
+        // An identical re-record with unchanged timestamps is idempotent (0 modifications).
+        let idempotent = storage
             .record_ticket_observations(&[(
                 *qualified_peer.node_pubkey(),
                 *qualified_peer.hrw_routing_id(),
@@ -464,14 +475,14 @@ async fn test_persisted_ticket_observations_survive_restart_while_new_tickets_in
                 false,
             )])
             .expect("idempotent re-record");
-        assert_eq!(inserted_again, 0);
+        assert_eq!(idempotent, 0);
     }
 
     // Simulate daemon restart: reopen RedbStorage and seed a fresh PeerManager (production 24h mode)
     let storage = RedbStorage::open(&db_path).expect("reopen redb");
     let pm = PeerManager::new(vec![]);
     pm.set_min_work_floor_for_test(1);
-    for (pk, hrw, seen_ms, qualified) in storage
+    for (pk, hrw, seen_ms, _last_seen_ms, qualified) in storage
         .all_ticket_observations()
         .expect("load observations")
     {
@@ -768,3 +779,328 @@ async fn test_real_quic_heartbeat_persisted_ticket_eligibility() {
     let _ = accept_handle_qualified.await;
     let _ = accept_handle_unqualified.await;
 }
+
+#[tokio::test]
+async fn test_s06_10_dormant_remote_ticket_retention_60_days_and_restart() {
+    let cancel = CancellationToken::new();
+    let observer = NodeIdentity::generate();
+    let relay = NodeIdentity::generate();
+    let (origin, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine ticket origin");
+
+    let pm_obs = Arc::new(PeerManager::with_f2f(vec![], vec![*relay.node_pubkey()]));
+    pm_obs.set_min_work_floor_for_test(1);
+    let pm_rel = Arc::new(PeerManager::with_f2f(vec![], vec![*observer.node_pubkey()]));
+    pm_rel.set_min_work_floor_for_test(1);
+
+    let receiver = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &observer,
+        pm_obs.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind receiver");
+
+    let sender = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &relay,
+        pm_rel.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind sender");
+
+    let receiver_addr = receiver.local_addr().expect("receiver addr");
+    let sender_addr = sender.local_addr().expect("sender addr");
+
+    pm_obs.register_f2f_friend(*relay.node_pubkey(), Some(sender_addr)).await;
+    pm_rel.register_f2f_friend(*observer.node_pubkey(), Some(receiver_addr)).await;
+
+    receiver.spawn_accept_loop();
+    sender.spawn_accept_loop();
+
+    let conn = sender
+        .connect_peer_unchecked(receiver_addr)
+        .await
+        .expect("connect");
+
+    let origin_addr: SocketAddr = "127.0.0.1:32010".parse().unwrap();
+
+    // Seed legitimately qualified state for remote non-friend origin (>24h incubation, qualified=true)
+    pm_obs.seed_persisted_ticket_state(
+        *origin.node_pubkey(),
+        *origin.hrw_routing_id(),
+        Duration::from_secs(25 * 3600),
+        true,
+    );
+    pm_obs
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *origin.node_pubkey(),
+            *origin.hrw_routing_id(),
+            origin_addr,
+            1,
+            Some(sender_addr),
+            origin.work_score(),
+            true,
+        )
+        .await;
+
+    // Simulate 61 days of dormancy (>60-day remote metadata retention per Spec 07 §4 / INV-0705)
+    pm_obs
+        .set_last_seen_for_test(
+            origin.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(61 * 86_400),
+        )
+        .await;
+
+    // Prior to new heartbeat: origin is stale and excluded from committee
+    let (before_comm, _, _) = pm_obs
+        .shard_committee(*observer.node_pubkey(), *observer.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        !before_comm.iter().any(|m| m.node_pubkey == *origin.node_pubkey()),
+        "Stale origin must be excluded from committee"
+    );
+
+    // Deliver ONE fresh authenticated origin-signed heartbeat over real QUIC via relay
+    let mut hb = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *origin.node_pubkey(),
+        addr: origin_addr,
+        timestamp_ms: pm_obs.net_time_ms(),
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: *origin.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 15,
+    };
+    hb.sign_origin(&origin, pm_obs.net_time_ms(), humoco_sim_core::types::NetworkId::Mainnet);
+    let bytes = bincode::serialize(&hb).unwrap();
+    let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, bytes.len() as u32);
+    hdr.reserved = 1; // hops = 1 (relayed)
+    sender.send_unidirectional(&conn, &hdr, &bytes).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // S06-10 Invariant: After 61 days of dormancy, delivering 1 heartbeat must NOT restore immediate
+    // committee eligibility or latched qualification! The expired remote identity must re-incubate as a newcomer.
+    let (after_comm, _, _) = pm_obs
+        .shard_committee(*observer.node_pubkey(), *observer.hrw_routing_id(), 42)
+        .await;
+    assert!(
+        !after_comm.iter().any(|m| m.node_pubkey == *origin.node_pubkey()),
+        "S06-10: Returning remote non-friend dormant for 61d (>60d retention) must NOT be committee-eligible after 1 heartbeat"
+    );
+    assert!(
+        !pm_obs.is_hrw_eligible(origin.node_pubkey()).await,
+        "S06-10: Returning remote non-friend dormant for 61d must NOT be HRW eligible after 1 heartbeat"
+    );
+
+    // 2. Retention boundary test inside retention (< 60 days, e.g. 59 days):
+    let (inside_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine ticket inside");
+    let inside_addr: SocketAddr = "127.0.0.1:32011".parse().unwrap();
+    pm_obs.seed_persisted_ticket_state(
+        *inside_peer.node_pubkey(),
+        *inside_peer.hrw_routing_id(),
+        Duration::from_secs(25 * 3600),
+        true,
+    );
+    pm_obs
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *inside_peer.node_pubkey(),
+            *inside_peer.hrw_routing_id(),
+            inside_addr,
+            1,
+            Some(sender_addr),
+            inside_peer.work_score(),
+            true,
+        )
+        .await;
+    pm_obs
+        .set_last_seen_for_test(
+            inside_peer.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(59 * 86_400),
+        )
+        .await;
+
+    // Inside 60 days: fresh heartbeat refreshes presence and retains justified admission
+    let mut hb_inside = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *inside_peer.node_pubkey(),
+        addr: inside_addr,
+        timestamp_ms: pm_obs.net_time_ms(),
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: *inside_peer.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 15,
+    };
+    hb_inside.sign_origin(&inside_peer, pm_obs.net_time_ms(), humoco_sim_core::types::NetworkId::Mainnet);
+    let bytes_inside = bincode::serialize(&hb_inside).unwrap();
+    let mut hdr_inside = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, bytes_inside.len() as u32);
+    hdr_inside.reserved = 1;
+    sender.send_unidirectional(&conn, &hdr_inside, &bytes_inside).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if pm_obs.is_hrw_eligible(inside_peer.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        pm_obs.is_hrw_eligible(inside_peer.node_pubkey()).await,
+        "Remote non-friend returning within < 60 days must retain qualified admission"
+    );
+
+    // 3. RedbStorage + daemon restart restoration:
+    // Persisted remote ticket observations older than 60 days MUST NOT resurrect qualification on restart.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("retention_test.redb");
+    let now_boot_ms: u64 = 2_000_000_000_000;
+    let expired_last_seen = now_boot_ms - (61 * 86_400 * 1000);
+    let valid_last_seen = now_boot_ms - (59 * 86_400 * 1000);
+    let (expired_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine ticket expired");
+    let (retained_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine ticket retained");
+    let (friend_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine ticket friend");
+
+    {
+        let storage = RedbStorage::open(&db_path).expect("open redb");
+        storage
+            .record_ticket_observation_records(&[
+                (
+                    *expired_peer.node_pubkey(),
+                    *expired_peer.hrw_routing_id(),
+                    now_boot_ms - (70 * 86_400 * 1000),
+                    expired_last_seen,
+                    true,
+                ),
+                (
+                    *retained_peer.node_pubkey(),
+                    *retained_peer.hrw_routing_id(),
+                    now_boot_ms - (70 * 86_400 * 1000),
+                    valid_last_seen,
+                    true,
+                ),
+                (
+                    *friend_peer.node_pubkey(),
+                    *friend_peer.hrw_routing_id(),
+                    now_boot_ms - (70 * 86_400 * 1000),
+                    expired_last_seen, // 61 days ago for direct friend
+                    true,
+                ),
+            ])
+            .expect("record records");
+    }
+
+    // Reopen and simulate startup restoration with friend configured
+    let storage = RedbStorage::open(&db_path).expect("reopen redb");
+    let pm_fresh = Arc::new(PeerManager::with_f2f(vec![], vec![*friend_peer.node_pubkey()]));
+    pm_fresh.set_min_work_floor_for_test(1);
+
+    let observations = storage.all_ticket_observations().expect("load all");
+    for (pk, hrw, first_seen_ms, last_seen_ms, admission_qualified) in &observations {
+        let is_direct_friend = pm_fresh.is_f2f_friend(pk).await;
+        let retention_ms = if is_direct_friend {
+            humoco_node::network::manager::DIRECT_FRIEND_RETENTION_MS
+        } else {
+            humoco_node::network::manager::REMOTE_METADATA_RETENTION_MS
+        };
+        let elapsed = now_boot_ms.saturating_sub(*last_seen_ms);
+        if elapsed > retention_ms {
+            continue; // Dropped on startup
+        }
+        let age = Duration::from_millis(now_boot_ms.saturating_sub(*first_seen_ms));
+        pm_fresh.seed_persisted_ticket_state_with_last_seen(*pk, *hrw, age, *admission_qualified, *last_seen_ms);
+    }
+
+    // Connect them to pm_fresh:
+    let addr_test: SocketAddr = "127.0.0.1:32015".parse().unwrap();
+    // 1) Expired remote peer: qualification was dropped, treated as newcomer (immature)
+    pm_fresh
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *expired_peer.node_pubkey(),
+            *expired_peer.hrw_routing_id(),
+            addr_test,
+            1,
+            Some(addr_test),
+            expired_peer.work_score(),
+            true,
+        )
+        .await;
+    assert!(
+        !pm_fresh.is_hrw_eligible(expired_peer.node_pubkey()).await,
+        "Expired remote peer (>60d) must NOT have qualification restored on restart"
+    );
+
+    // 2) Retained remote peer (<60d): qualification preserved
+    pm_fresh
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *retained_peer.node_pubkey(),
+            *retained_peer.hrw_routing_id(),
+            addr_test,
+            1,
+            Some(addr_test),
+            retained_peer.work_score(),
+            true,
+        )
+        .await;
+    assert!(
+        pm_fresh.is_hrw_eligible(retained_peer.node_pubkey()).await,
+        "Retained remote peer (<60d) MUST have qualification restored on restart"
+    );
+
+    // 3) Direct friend (61d inactive): within 1-year direct friend retention, qualification preserved!
+    let work_friend = friend_peer.work_score().max(retained_peer.work_score());
+    pm_fresh
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *friend_peer.node_pubkey(),
+            *friend_peer.hrw_routing_id(),
+            addr_test,
+            0,
+            Some(addr_test),
+            work_friend,
+            true,
+        )
+        .await;
+    assert!(
+        pm_fresh.is_hrw_eligible(friend_peer.node_pubkey()).await,
+        "Direct friend inactive for 61d (within 1-year policy) MUST have qualification preserved on restart"
+    );
+
+    // 4) Invariant verification: Live voucher locks and fraud bans never expired
+    let ban_pk = [0xbb; 32];
+    storage.ban_node(&ban_pk, now_boot_ms).expect("record ban");
+    assert!(storage.is_node_banned(&ban_pk).expect("check ban"));
+    // Prune dormant ticket observations
+    storage
+        .prune_dormant_ticket_observations(now_boot_ms, |pk| *pk == *friend_peer.node_pubkey())
+        .expect("prune");
+    assert!(
+        storage.is_node_banned(&ban_pk).expect("check ban intact"),
+        "Irreversible fraud bans must NEVER be pruned by metadata retention"
+    );
+
+    cancel.cancel();
+}
+

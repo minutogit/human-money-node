@@ -197,6 +197,7 @@ struct RunCleanup {
     flush: parking_lot::Mutex<Option<(CancellationToken, tokio::task::AbortHandle)>>,
     quota_failed: parking_lot::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
     recovery_work: parking_lot::Mutex<Option<tokio_util::task::TaskTracker>>,
+    tier_controller: parking_lot::Mutex<Option<std::sync::Arc<crate::ingress::TierController>>>,
 }
 
 impl RunCleanup {
@@ -225,6 +226,18 @@ impl RunCleanup {
             work.close();
             work.wait().await;
         }
+        let tc = self.tier_controller.lock().take();
+        if let Some(tc) = tc {
+            let ah = tc.accounting_worker_abort_handle();
+            let qh = tc.quota_worker_abort_handle();
+            let _ = tc.wait_for_accounting_drain().await;
+            ah.abort();
+            qh.abort();
+            drop(tc);
+            while !ah.is_finished() || !qh.is_finished() {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        }
         let flush = self.flush.lock().clone();
         if let Some((cancel, handle)) = flush {
             cancel.cancel();
@@ -248,6 +261,10 @@ impl RunCleanup {
         }
         for producer in self.producers.lock().iter() {
             producer.abort();
+        }
+        if let Some(tc) = self.tier_controller.lock().as_ref() {
+            tc.accounting_worker_abort_handle().abort();
+            tc.quota_worker_abort_handle().abort();
         }
     }
 }
@@ -508,14 +525,7 @@ impl NodeDaemon {
             storage.clone(),
             pow_engine.clone(),
         ));
-        cleanup
-            .producers
-            .lock()
-            .push(tier_controller.quota_worker_abort_handle());
-        cleanup
-            .producers
-            .lock()
-            .push(tier_controller.accounting_worker_abort_handle());
+        *cleanup.tier_controller.lock() = Some(tier_controller.clone());
         *cleanup.quota_failed.lock() = Some(tier_controller.quota_worker_failure_handle());
         // Client friend secrets are strictly decoupled from P2P network peer topology (A25-03).
         // P2P peer keys/endpoints are NEVER registered as HTTP ingress bearer tokens.
@@ -552,60 +562,17 @@ impl NodeDaemon {
             let boot_now_ms = peer_manager.net_time_ms();
             let local_pk = *current_id.node_pubkey();
             let local_hrw = *current_id.hrw_routing_id();
-            let mut local_prior_age = std::time::Duration::ZERO;
-            let mut local_prior_qualified = false;
             let sim_mode = self.config.network.simulation_mode;
-            match storage.all_ticket_observations() {
-                Ok(observations) => {
-                    for (pk, hrw, first_seen_ms, last_seen_ms, admission_qualified) in &observations {
-                        let is_shortcut = *hrw == *blake3::hash(pk).as_bytes()
-                            || *hrw == *pk
-                            || *hrw == [0u8; 32];
-                        if !sim_mode && is_shortcut {
-                            continue;
-                        }
-                        let is_direct_friend = peer_manager.is_f2f_friend(pk).await;
-                        let retention_ms = if is_direct_friend {
-                            crate::network::manager::DIRECT_FRIEND_RETENTION_MS
-                        } else {
-                            crate::network::manager::REMOTE_METADATA_RETENTION_MS
-                        };
-                        let elapsed_inactivity = boot_now_ms.saturating_sub(*last_seen_ms);
-                        if elapsed_inactivity > retention_ms {
-                            debug!(
-                                node = %hex::encode(pk),
-                                elapsed_ms = elapsed_inactivity,
-                                retention_ms,
-                                "Persisted ticket observation exceeded retention window; expiring on startup"
-                            );
-                            continue;
-                        }
-                        let age = std::time::Duration::from_millis(
-                            boot_now_ms.saturating_sub(*first_seen_ms),
-                        );
-                        peer_manager.seed_persisted_ticket_state_with_last_seen(
-                            *pk,
-                            *hrw,
-                            age,
-                            *admission_qualified,
-                            *last_seen_ms,
-                        );
-                        if *pk == local_pk && *hrw == local_hrw {
-                            local_prior_age = age;
-                            local_prior_qualified = *admission_qualified;
-                        }
-                    }
-                    if !observations.is_empty() {
-                        info!(
-                            restored = observations.len(),
-                            "Restored persisted HRW ticket observations into PeerManager"
-                        );
-                    }
-                }
+            let (local_prior_age, local_prior_qualified) = match peer_manager
+                .restore_persisted_ticket_observations(&storage, boot_now_ms, Some((local_pk, local_hrw)))
+                .await
+            {
+                Ok((age, qualified)) => (age, qualified),
                 Err(err) => {
                     warn!(error = %err, "Failed to load persisted HRW ticket observations from redb");
+                    (std::time::Duration::ZERO, false)
                 }
-            }
+            };
             if sim_mode || current_id.has_valid_pow_ticket() {
                 peer_manager.seed_local_ticket_age(local_pk, local_hrw, local_prior_age);
                 if let Err(err) =
@@ -775,22 +742,12 @@ impl NodeDaemon {
                     _ = interval.tick() => {
                         let now_ms = thermo_pm.net_time_ms();
                         // Persist qualified HRW tickets off the Tokio async worker thread.
-                        let mut qualified_tickets: Vec<crate::storage::db::TicketObservationRecord> = thermo_pm
-                            .snapshot_qualified_tickets()
-                            .await
-                            .into_iter()
-                            .map(|(pk, hrw)| (pk, hrw, now_ms, now_ms, true))
-                            .collect();
-                        if thermo_pm.local_ticket_is_mature() {
-                            qualified_tickets.push((thermo_self_ticket.0, thermo_self_ticket.1, now_ms, now_ms, true));
-                        }
-                        if !qualified_tickets.is_empty() {
-                            let persist_storage = thermo_storage.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                persist_storage.record_ticket_observation_records(&qualified_tickets)
-                            })
+                        let _ = thermo_pm
+                            .persist_periodic_ticket_observations(
+                                thermo_storage.clone(),
+                                Some(thermo_self_ticket),
+                            )
                             .await;
-                        }
                         let prune_storage = thermo_storage.clone();
                         let friends = thermo_pm.f2f_friends_snapshot().await;
                         drop(tokio::task::spawn_blocking(move || {
@@ -928,9 +885,20 @@ impl NodeDaemon {
                             debug!("Heartbeat tick: no F2F friends configured");
                             continue;
                         }
-                        let declared_write_ema = hb_tc.current_write_ema_micro_bj();
-                        let declared_read_ema = hb_tc.current_read_ema_credits();
                         let now_ms = hb_pm.net_time_ms();
+                        let (declared_write_ema, declared_read_ema) = match hb_tc
+                            .durable_ema_snapshot(now_ms)
+                            .await
+                        {
+                            Ok(emas) => emas,
+                            Err(err) => {
+                                warn!(
+                                    error = %err,
+                                    "Skipping heartbeat tick: failed to persist durable EMA snapshot"
+                                );
+                                continue;
+                            }
+                        };
                         let piggyback = hb_pm.sample_piggyback_evidences(2).await;
 
                         let mut any_failed = false;

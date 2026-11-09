@@ -519,9 +519,9 @@ pub async fn collect_live_state_proof(
     };
 
     let mut jobs = tokio::task::JoinSet::new();
-    let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
-    let declared_read_ema = state.tier_controller.current_read_ema_credits();
     let net_time_ms = state.net_time_ms();
+    let (declared_write_ema, declared_read_ema) =
+        state.tier_controller.status_query_emas_at(net_time_ms);
 
     for (member, addr) in remotes {
         let q = MemberLiveQuery {

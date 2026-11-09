@@ -21,7 +21,7 @@ pub use peer::{PeerConnectionType, PeerInfo, PeerStatus, FAILURE_DEBOUNCE_SECS};
 pub use tls::{
     build_quinn_client_config, build_quinn_client_config_with_identity,
     build_quinn_client_config_with_identity_and_network,
-    build_quinn_client_config_with_identity_with_network, build_quinn_client_config_with_network,
+    build_quinn_client_config_with_network,
     build_quinn_server_config, build_quinn_server_config_with_network, generate_node_certificate,
     get_alpn_for_network, init_crypto_provider, P2pCertVerifier, ALPN_HUMOCO_L2,
 };

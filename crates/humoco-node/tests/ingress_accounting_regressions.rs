@@ -33,8 +33,9 @@ use humoco_node::{
         routes::build_operator_router,
         AppState,
     },
+    config::NodeConfig,
     control::parse_account_tag,
-    daemon::ShardReadinessManager,
+    daemon::{BoundAddrs, NodeDaemon, ShardReadinessManager},
     identity::NodeIdentity,
     ingress::{
         pow::{self, count_leading_zero_bits, hash_work, PowError},
@@ -42,10 +43,10 @@ use humoco_node::{
         IngressError, IngressTier, PowEngine, TierController,
     },
     network::{
-        framing::LockWirePayload, DefaultRequestHandler, NodeRequestHandler, PeerManager,
+        framing::{HeartbeatWirePayload, LockWirePayload}, DefaultRequestHandler, NodeRequestHandler, PeerManager,
         QuicTransport,
     },
-    storage::{DualTierEngine, RedbStorage},
+    storage::{DualTierEngine, PersistedIngressAccountingState, RedbStorage},
 };
 use humoco_sim_core::{
     fraud::{compute_ingress_envelope_digest, FraudProofPayload, IngressEnvelopeEvidence},
@@ -2241,7 +2242,7 @@ async fn test_s05_11_restart_preserves_ingress_accounting_monotonicity() {
         assert_eq!(alloc2.cumulative_micro_byte_years, 300);
         assert_eq!(alloc2.prev_day_final_bytes, 0);
         alloc2_seq = alloc2.epoch_seq;
-        tc.wait_for_accounting_drain().await;
+        tc.wait_for_accounting_drain().await.unwrap();
     }
 
     // Node restart: re-instantiate TierController against intact storage (reloads from disk)
@@ -2355,7 +2356,7 @@ async fn test_s05_11_calendar_day_rollover_and_restart() {
             "prev_day_final_bytes must preserve final cumulative bytes of Day 100"
         );
         alloc3_seq = alloc3.epoch_seq;
-        tc.wait_for_accounting_drain().await;
+        tc.wait_for_accounting_drain().await.unwrap();
     }
 
     // Node restarts on next day against intact storage
@@ -2374,6 +2375,70 @@ async fn test_s05_11_calendar_day_rollover_and_restart() {
             "prev_day_final_bytes must remain intact across restart on Day 101"
         );
     }
+}
+
+#[tokio::test]
+async fn test_s05_11_day_rollover_after_high_sequence_lease() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("high_lease_rollover.redb");
+    let day_ms = 86_400_000u64;
+
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let boot_day = pow.now_ms() / day_ms;
+    let base_t = boot_day * day_ms;
+
+    let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+
+    // 1. Day D: perform allocations exceeding INGRESS_SEQ_LEASE_BLOCK (1024), e.g. 1025 allocations,
+    // to trigger a higher sequence lease (> 1024, namely 2048).
+    for i in 1..=1025 {
+        let alloc = tc.record_declared_usage(base_t + i, 1).await.unwrap();
+        assert_eq!(alloc.epoch_day, boot_day as u32);
+        assert_eq!(alloc.epoch_seq, i);
+    }
+    tc.wait_for_accounting_drain().await.unwrap();
+
+    let persisted_d = storage.load_ingress_accounting_state().unwrap().unwrap();
+    assert_eq!(persisted_d.current_day, boot_day);
+    assert_eq!(persisted_d.last_epoch_seq, 1025);
+    assert_eq!(
+        persisted_d.reserved_epoch_seq, 2048,
+        "Day D reserved_epoch_seq must reflect second lease block (2048)"
+    );
+
+    // 2. Rollover to Day D+1: allocate seq 1 on Day D+1
+    let next_day_t = base_t + day_ms + 100;
+    let alloc_next_1 = tc.record_declared_usage(next_day_t, 1).await.unwrap();
+    assert_eq!(alloc_next_1.epoch_day, (boot_day + 1) as u32);
+    assert_eq!(alloc_next_1.epoch_seq, 1);
+
+    tc.wait_for_accounting_drain().await.unwrap();
+    let persisted_d1 = storage.load_ingress_accounting_state().unwrap().unwrap();
+    assert_eq!(persisted_d1.current_day, boot_day + 1);
+    assert_eq!(persisted_d1.last_epoch_seq, 1);
+    assert_eq!(
+        persisted_d1.reserved_epoch_seq,
+        humoco_node::ingress::tier::INGRESS_SEQ_LEASE_BLOCK,
+        "Day D+1 initial reserved_epoch_seq must start at INGRESS_SEQ_LEASE_BLOCK (1024), NOT Day D's high reserved_epoch_seq ({})",
+        persisted_d.reserved_epoch_seq
+    );
+
+    // 3. Advance properly past INGRESS_SEQ_LEASE_BLOCK on Day D+1
+    for i in 2..=1025 {
+        let alloc = tc.record_declared_usage(next_day_t + i, 1).await.unwrap();
+        assert_eq!(alloc.epoch_day, (boot_day + 1) as u32);
+        assert_eq!(alloc.epoch_seq, i);
+    }
+    tc.wait_for_accounting_drain().await.unwrap();
+
+    let persisted_d1_high = storage.load_ingress_accounting_state().unwrap().unwrap();
+    assert_eq!(persisted_d1_high.current_day, boot_day + 1);
+    assert_eq!(persisted_d1_high.last_epoch_seq, 1025);
+    assert_eq!(
+        persisted_d1_high.reserved_epoch_seq, 2048,
+        "Day D+1 reserved_epoch_seq must advance properly past 1024 to 2048 once allocations exceed 1024"
+    );
 }
 
 #[tokio::test]
@@ -2531,7 +2596,7 @@ async fn test_s05_11_real_quic_restart_regression() {
             "Receiver must durably record write evidence for Phase 1"
         );
 
-        gw_tier.wait_for_accounting_drain().await;
+        gw_tier.wait_for_accounting_drain().await.unwrap();
         gw_cancel.cancel();
         gw_transport.close();
     }
@@ -4326,7 +4391,7 @@ async fn test_s05_15_write_ema_restart_continuity() {
             alloc1.declared_write_ema_micro_bj > 0,
             "Phase 1 write EMA must be nonzero"
         );
-        tc.wait_for_accounting_drain().await;
+        tc.wait_for_accounting_drain().await.unwrap();
         (alloc1, pk, sk)
     };
 
@@ -4453,7 +4518,7 @@ async fn test_s05_15_read_ema_restart_continuity() {
             alloc1.declared_read_ema_credits > 0,
             "Phase 1 read EMA must be nonzero"
         );
-        tc.wait_for_accounting_drain().await;
+        tc.wait_for_accounting_drain().await.unwrap();
         (alloc1, pk, sk)
     };
 
@@ -4631,7 +4696,7 @@ async fn test_s05_15_fractional_precision_and_decay_continuity() {
         .expect("write admission");
 
         let alloc1 = tc.record_declared_usage(t1, 50).await.unwrap();
-        tc.wait_for_accounting_drain().await;
+        tc.wait_for_accounting_drain().await.unwrap();
         (alloc1.clone(), alloc1.declared_write_ema_micro_bj)
     };
 
@@ -4677,7 +4742,7 @@ async fn test_s05_15_calendar_day_rollover_continuous_ema() {
 
         let alloc1 = tc.record_declared_usage(t1, 50).await.unwrap();
         assert_eq!(alloc1.epoch_day, boot_day as u32);
-        tc.wait_for_accounting_drain().await;
+        tc.wait_for_accounting_drain().await.unwrap();
         alloc1
     };
 
@@ -4847,7 +4912,7 @@ async fn test_s05_15_real_quic_write_and_read_restart_continuity() {
         assert_eq!(resp_hdr1.flags & humoco_sim_core::wire::FLAG_QUOTA_FRAUD, 0);
         assert!(server_peer_mgr.get_node_write_evidence(&gateway_pubkey).await.is_some());
 
-        gw_tier.wait_for_accounting_drain().await;
+        gw_tier.wait_for_accounting_drain().await.unwrap();
         gw_cancel.cancel();
         gw_transport.close();
     }
@@ -5156,6 +5221,689 @@ fn test_s05_16_token_file_permission_failure_propagates() {
         assert_eq!(err_new.kind(), std::io::ErrorKind::PermissionDenied);
     }
 }
+
+// ===========================================================================
+// S05-17: Durable EMA Persistence Across Restarts & Lifecycles
+// ===========================================================================
+
+#[tokio::test]
+async fn test_s05_17_genesis_registration_and_rejected_admission_durable_ema() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s05_17_genesis.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+
+    let (engine, _) = DualTierEngine::new(storage.clone());
+    let id = NodeIdentity::generate();
+    let state = AppState::new(engine, storage.clone(), id.clone(), tc.clone(), pow.clone());
+    for s in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(s);
+    }
+    let router = build_router(state);
+
+    let initial = storage.load_ingress_accounting_state().unwrap().unwrap();
+    assert_eq!(initial.write_ema_scaled, 0);
+
+    let now_ms = test_now_ms();
+    // 1. Successful authenticated HTTP genesis registration (POST /v1/lock with is_genesis: true)
+    let genesis = make_test_hmc_genesis([0x91; 32], now_ms + 100_000, id.signing_key());
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&genesis).unwrap()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let thermo_ema = tc.write_ema_micro_bj_at(now_ms / 1000);
+    assert!(thermo_ema > 0, "Genesis registration must mutate thermometer write EMA");
+
+    // 2. Write admission followed by signature rejection (400 Bad Request)
+    let mut bad_sig = make_test_hmc_genesis([0x92; 32], now_ms + 100_000, id.signing_key());
+    bad_sig.is_genesis = false;
+    bad_sig.ds_tag = Some("bad_sig_tag_1".to_string());
+    bad_sig.layer2_signature = [0xbb; 64];
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&bad_sig).unwrap()))
+        .unwrap();
+    let resp2 = router.clone().oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::BAD_REQUEST);
+
+    // 3. Admission followed by cancellation before record_declared_usage
+    tc.evaluate_and_charge_with_time_and_retry(
+        None,
+        None,
+        None,
+        None,
+        humoco_sim_core::quota::SECONDS_PER_YEAR,
+        Some(&[0x93; 32]),
+        Some(now_ms),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Draining / checkpointing
+    tc.wait_for_accounting_drain().await.unwrap();
+
+    // Verify in storage: envelope day, sequence, usage, timestamp unchanged, but write_ema_scaled and anchor are durable!
+    let loaded = storage.load_ingress_accounting_state().unwrap().unwrap();
+    assert_eq!(loaded.last_epoch_seq, initial.last_epoch_seq);
+    assert_eq!(loaded.cumulative_micro_byte_years, initial.cumulative_micro_byte_years);
+    assert_eq!(loaded.last_timestamp_ms, initial.last_timestamp_ms);
+    assert!(
+        loaded.write_ema_scaled > 0,
+        "Durable ingress accounting state must persist updated write_ema_scaled even when envelope sequence and usage are unchanged!"
+    );
+    assert!(
+        loaded.last_write_ema_sec.is_some(),
+        "Durable ingress accounting state must persist last_write_ema_sec anchor!"
+    );
+}
+
+#[tokio::test]
+async fn test_s05_17_ema_only_snapshot_drain_and_decay_ordering() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s05_17_ema_decay.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+    let day_ms = 86_400_000u64;
+    let boot_day = pow.now_ms() / day_ms;
+    let t1 = boot_day * day_ms + 5_000;
+    let t1_sec = t1 / 1000;
+
+    let tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let initial = storage.load_ingress_accounting_state().unwrap().unwrap();
+    let initial_day = initial.current_day;
+    let initial_seq = initial.last_epoch_seq;
+    let initial_cum = initial.cumulative_micro_byte_years;
+    let initial_ts = initial.last_timestamp_ms;
+
+    let (exported_w_scaled, exported_w_sec, exported_r_scaled, exported_r_sec) = {
+        // Admit write without record_declared_usage
+        tc.evaluate_and_charge_with_time_and_retry(
+            None,
+            None,
+            None,
+            None,
+            humoco_sim_core::quota::SECONDS_PER_YEAR,
+            Some(&[0x44; 32]),
+            Some(t1),
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Evaluate read quota
+        tc.evaluate_read_quota_with_time(42, 500, 1.0, Some(t1)).unwrap();
+
+        let (w_scaled, w_sec, r_scaled, r_sec) = tc
+            .thermometer()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .raw_ema_state();
+        assert!(w_scaled > 0);
+        assert!(r_scaled > 0);
+        assert_eq!(w_sec, Some(t1_sec));
+        assert_eq!(r_sec, Some(t1_sec));
+
+        tc.wait_for_accounting_drain().await.unwrap();
+        (w_scaled, w_sec, r_scaled, r_sec)
+    };
+
+    // Verify envelope remains unchanged on disk while EMA state is durable
+    let disk_state = storage.load_ingress_accounting_state().unwrap().unwrap();
+    assert_eq!(disk_state.current_day, initial_day);
+    assert_eq!(disk_state.last_epoch_seq, initial_seq);
+    assert_eq!(disk_state.cumulative_micro_byte_years, initial_cum);
+    assert_eq!(disk_state.last_timestamp_ms, initial_ts);
+    assert_eq!(disk_state.write_ema_scaled, exported_w_scaled);
+    assert_eq!(disk_state.last_write_ema_sec, exported_w_sec);
+    assert_eq!(disk_state.read_ema_scaled, exported_r_scaled);
+    assert_eq!(disk_state.last_read_ema_sec, exported_r_sec);
+
+    // Drop storage and reopen to test lifecycle reconstruction
+    tc.quota_worker_abort_handle().abort();
+    tc.accounting_worker_abort_handle().abort();
+    drop(tc);
+    drop(storage);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let reopened_storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let tc2 = Arc::new(TierController::new(reopened_storage.clone(), pow.clone()));
+
+    // Verify reconstructed controller has exact fractional EMA state
+    let (recon_w_scaled, recon_w_sec, recon_r_scaled, recon_r_sec) = tc2
+        .thermometer()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .raw_ema_state();
+    assert_eq!(recon_w_scaled, exported_w_scaled);
+    assert_eq!(recon_w_sec, exported_w_sec);
+    assert_eq!(recon_r_scaled, exported_r_scaled);
+    assert_eq!(recon_r_sec, exported_r_sec);
+
+    // Verify elapsed-time physical decay (where raw values lawfully decrease)
+    let t2_sec = t1_sec + 30;
+    let decayed_w = tc2.write_ema_micro_bj_at(t2_sec);
+    let original_w = tc2.write_ema_micro_bj_at(t1_sec);
+    assert!(decayed_w > 0, "Decayed write EMA must be non-zero");
+    assert!(decayed_w < original_w, "Decayed write EMA must decrease over physical time");
+}
+
+#[tokio::test]
+async fn test_s05_17_real_quic_direct_friend_heartbeat_continuity() {
+    let cancel = CancellationToken::new();
+
+    // 1. Setup Observer
+    let observer = NodeIdentity::generate();
+    let obs_temp = tempdir().unwrap();
+    let obs_db = obs_temp.path().join("obs_hb.redb");
+    let obs_storage = Arc::new(RedbStorage::open(&obs_db).unwrap());
+    let (obs_engine, _) = DualTierEngine::new(obs_storage.clone());
+
+    // 2. Setup Friend
+    let (friend, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine friend");
+    let friend_temp = tempdir().unwrap();
+    let friend_db = friend_temp.path().join("friend_hb.redb");
+    let friend_storage = Arc::new(RedbStorage::open(&friend_db).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+
+    let pm_obs = Arc::new(PeerManager::with_f2f(vec![], vec![*friend.node_pubkey()]));
+    pm_obs.set_storage(Arc::downgrade(&obs_storage));
+    pm_obs.set_engine(&obs_engine);
+    pm_obs.set_min_work_floor_for_test(1);
+
+    let pm_friend = Arc::new(PeerManager::with_f2f(vec![], vec![*observer.node_pubkey()]));
+    pm_friend.set_min_work_floor_for_test(1);
+
+    let obs_handler = Arc::new(NodeRequestHandler::with_peer_manager(
+        obs_engine.clone(),
+        obs_storage.clone(),
+        observer.clone(),
+        pm_obs.clone(),
+    ));
+
+    let receiver = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &observer,
+        pm_obs.clone(),
+        obs_handler,
+        cancel.clone(),
+    )
+    .expect("bind receiver");
+
+    let sender = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &friend,
+        pm_friend.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind sender");
+
+    let receiver_addr = receiver.local_addr().expect("receiver addr");
+    let sender_addr = sender.local_addr().expect("sender addr");
+
+    pm_obs.register_f2f_friend(*friend.node_pubkey(), Some(sender_addr)).await;
+    pm_friend.register_f2f_friend(*observer.node_pubkey(), Some(receiver_addr)).await;
+
+    receiver.spawn_accept_loop();
+    sender.spawn_accept_loop();
+
+    let conn = sender.connect_peer_unchecked(receiver_addr).await.expect("connect");
+
+    // 3. Friend admits write with TTL 31_536_000 without record_declared_usage
+    let now_ms = pm_obs.net_time_ms();
+    let tc = Arc::new(TierController::new(friend_storage.clone(), pow.clone()));
+    tc.evaluate_and_charge_with_time_and_retry(
+        None,
+        None,
+        None,
+        None,
+        31_536_000,
+        Some(&[0x77; 32]),
+        Some(now_ms),
+        false,
+    )
+    .await
+    .unwrap();
+    tc.wait_for_accounting_drain().await.unwrap();
+
+    let w_ema1 = tc.write_ema_micro_bj_at(now_ms / 1000);
+    assert!(w_ema1 > 0, "Admitted write must produce non-zero write EMA");
+
+    // Send first signed heartbeat over real QUIC (hops = 0 direct friend)
+    let mut hb1 = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *friend.node_pubkey(),
+        addr: sender_addr,
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: w_ema1,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: friend.nonce(),
+        hrw_routing_id: *friend.hrw_routing_id(),
+        ticket_epoch_t0: friend.t0(),
+        ttl: 15,
+    };
+    hb1.sign_origin(&friend, now_ms, humoco_sim_core::types::NetworkId::Mainnet);
+    let bytes1 = bincode::serialize(&hb1).unwrap();
+    let mut hdr1 = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, bytes1.len() as u32);
+    hdr1.reserved = 0;
+    sender.send_unidirectional(&conn, &hdr1, &bytes1).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if pm_obs.get_node_write_evidence(friend.node_pubkey()).await.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        pm_obs.get_node_write_evidence(friend.node_pubkey()).await.is_some(),
+        "Receiver must record initial write evidence"
+    );
+    assert!(
+        !pm_obs.is_banned(friend.node_pubkey()).await,
+        "Friend must not be banned on honest initial heartbeat"
+    );
+
+    // 4. Test lifecycle reconstruction:
+    // (a) controller reconstruction against same storage
+    tc.quota_worker_abort_handle().abort();
+    tc.accounting_worker_abort_handle().abort();
+    drop(tc);
+    let tc_recon = Arc::new(TierController::new(friend_storage.clone(), pow.clone()));
+    let recon_w = tc_recon.write_ema_micro_bj_at((now_ms + 1000) / 1000);
+    assert!(
+        recon_w > 0,
+        "Reconstructed controller against same storage must reflect durable write EMA"
+    );
+    tc_recon.quota_worker_abort_handle().abort();
+    tc_recon.accounting_worker_abort_handle().abort();
+    drop(tc_recon);
+
+    // (b) database lifecycle reconstruction: drop storage and reopen from disk
+    drop(friend_storage);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let reopened_storage = Arc::new(RedbStorage::open(&friend_db).unwrap());
+    let tc_reopened = Arc::new(TierController::new(reopened_storage.clone(), pow.clone()));
+
+    // 5. Send second heartbeat 1 second later over real QUIC
+    let now_ms_2 = now_ms + 1000;
+    let w_ema2 = tc_reopened.write_ema_micro_bj_at(now_ms_2 / 1000);
+    assert!(
+        w_ema2 > 0,
+        "Decayed write EMA after node restart must be non-zero (persisted in storage)"
+    );
+
+    let mut hb2 = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *friend.node_pubkey(),
+        addr: sender_addr,
+        timestamp_ms: now_ms_2,
+        declared_write_ema_micro_bj: w_ema2,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: friend.nonce(),
+        hrw_routing_id: *friend.hrw_routing_id(),
+        ticket_epoch_t0: friend.t0(),
+        ttl: 15,
+    };
+    hb2.sign_origin(&friend, now_ms_2, humoco_sim_core::types::NetworkId::Mainnet);
+    let bytes2 = bincode::serialize(&hb2).unwrap();
+    let mut hdr2 = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, bytes2.len() as u32);
+    hdr2.reserved = 0;
+    sender.send_unidirectional(&conn, &hdr2, &bytes2).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !pm_obs.is_banned(friend.node_pubkey()).await,
+        "Friend must NOT be banned after restart when sending lawfully decayed EMA"
+    );
+
+    // 6. Conflicting evidence control: a malicious node signs high EMA then signs 0 EMA 1s later
+    let (bad_node, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine bad_node");
+    let bad_addr: SocketAddr = "127.0.0.1:39099".parse().unwrap();
+    pm_obs.register_f2f_friend(*bad_node.node_pubkey(), Some(bad_addr)).await;
+
+    let bad_sender = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &bad_node,
+        Arc::new(PeerManager::with_f2f(vec![], vec![*observer.node_pubkey()])),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind bad_sender");
+    bad_sender.spawn_accept_loop();
+    let bad_conn = bad_sender.connect_peer_unchecked(receiver_addr).await.expect("bad connect");
+
+    let mut bad_hb1 = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *bad_node.node_pubkey(),
+        addr: bad_addr,
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 50_000_000,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: bad_node.nonce(),
+        hrw_routing_id: *bad_node.hrw_routing_id(),
+        ticket_epoch_t0: bad_node.t0(),
+        ttl: 15,
+    };
+    bad_hb1.sign_origin(&bad_node, now_ms, humoco_sim_core::types::NetworkId::Mainnet);
+    let bad_bytes1 = bincode::serialize(&bad_hb1).unwrap();
+    let mut bad_hdr1 = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, bad_bytes1.len() as u32);
+    bad_hdr1.reserved = 0;
+    bad_sender.send_unidirectional(&bad_conn, &bad_hdr1, &bad_bytes1).await.unwrap();
+
+    let deadline_bad = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline_bad {
+        if pm_obs.get_node_write_evidence(bad_node.node_pubkey()).await.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Now send conflicting heartbeat declaring 0 EMA 1 second later
+    let mut bad_hb2 = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *bad_node.node_pubkey(),
+        addr: bad_addr,
+        timestamp_ms: now_ms + 1000,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: bad_node.nonce(),
+        hrw_routing_id: *bad_node.hrw_routing_id(),
+        ticket_epoch_t0: bad_node.t0(),
+        ttl: 15,
+    };
+    bad_hb2.sign_origin(&bad_node, now_ms + 1000, humoco_sim_core::types::NetworkId::Mainnet);
+    let bad_bytes2 = bincode::serialize(&bad_hb2).unwrap();
+    let mut bad_hdr2 = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, bad_bytes2.len() as u32);
+    bad_hdr2.reserved = 0;
+    bad_sender.send_unidirectional(&bad_conn, &bad_hdr2, &bad_bytes2).await.unwrap();
+
+    let deadline_ban = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline_ban {
+        if pm_obs.is_banned(bad_node.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        pm_obs.is_banned(bad_node.node_pubkey()).await,
+        "Malicious under-reporting node must be banned upon conflicting heartbeat"
+    );
+}
+
+#[tokio::test]
+async fn test_s05_17_stale_concurrent_snapshots_and_persistence_failure_isolation() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s05_17_stale.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let pow = Arc::new(PowEngine::new(0));
+
+    // Initial state setup in storage
+    let base_state = PersistedIngressAccountingState {
+        checkpoint_seq: 10,
+        current_day: 100,
+        last_epoch_seq: 5,
+        reserved_epoch_seq: 1000,
+        last_timestamp_ms: 100_000,
+        cumulative_micro_byte_years: 500,
+        prev_day_final_bytes: 0,
+        write_ema_scaled: 100u128 << 32,
+        last_write_ema_sec: Some(100),
+        read_ema_scaled: 50u128 << 32,
+        last_read_ema_sec: Some(100),
+    };
+    storage.store_ingress_accounting_state(&base_state).unwrap();
+    assert_eq!(storage.load_ingress_accounting_state().unwrap().unwrap(), base_state);
+
+    // 1. Identical snapshot -> idempotent Ok(()) no-op
+    assert!(!base_state.supersedes(&base_state));
+    storage.store_ingress_accounting_state(&base_state).unwrap();
+    assert_eq!(storage.load_ingress_accounting_state().unwrap().unwrap(), base_state);
+
+    // 2. Stale concurrent snapshot: lower checkpoint_seq (9 < 10) even with larger write_ema_scaled (200u128 << 32)
+    let stale_snapshot = PersistedIngressAccountingState {
+        checkpoint_seq: 9,
+        current_day: 100,
+        last_epoch_seq: 5,
+        reserved_epoch_seq: 1000,
+        last_timestamp_ms: 100_000,
+        cumulative_micro_byte_years: 500,
+        prev_day_final_bytes: 0,
+        write_ema_scaled: 200u128 << 32,
+        last_write_ema_sec: Some(100),
+        read_ema_scaled: 50u128 << 32,
+        last_read_ema_sec: Some(100),
+    };
+    assert!(!stale_snapshot.supersedes(&base_state));
+    storage.store_ingress_accounting_state(&stale_snapshot).unwrap();
+    assert_eq!(
+        storage.load_ingress_accounting_state().unwrap().unwrap(),
+        base_state,
+        "Stale snapshot with lower checkpoint_seq must be rejected"
+    );
+
+    // 3. Higher checkpoint_seq (11 > 10) when raw write_ema_scaled lawfully decayed lower (50u128 << 32 < 100u128 << 32) at t=110
+    let decayed_snapshot = PersistedIngressAccountingState {
+        checkpoint_seq: 11,
+        current_day: 100,
+        last_epoch_seq: 5,
+        reserved_epoch_seq: 1000,
+        last_timestamp_ms: 100_000,
+        cumulative_micro_byte_years: 500,
+        prev_day_final_bytes: 0,
+        write_ema_scaled: 50u128 << 32,
+        last_write_ema_sec: Some(110),
+        read_ema_scaled: 50u128 << 32,
+        last_read_ema_sec: Some(110),
+    };
+    assert!(decayed_snapshot.supersedes(&base_state));
+    storage.store_ingress_accounting_state(&decayed_snapshot).unwrap();
+    assert_eq!(
+        storage.load_ingress_accounting_state().unwrap().unwrap(),
+        decayed_snapshot,
+        "Higher checkpoint_seq with decayed EMA must supersede base state"
+    );
+
+    // 4. Persistence failure & queue saturation isolation
+    let tc = Arc::new(TierController::new_with_persist_capacity(storage.clone(), pow.clone(), 1));
+
+    // Simulate failure
+    tc.fail_accounting_persistence_for_test();
+    let err_durable = tc.durable_ema_snapshot(120_000).await;
+    assert!(
+        matches!(err_durable, Err(IngressError::AccountingPersistenceUnavailable)),
+        "durable_ema_snapshot must fail closed when persistence fails"
+    );
+
+    let err_drain = tc.wait_for_accounting_drain().await;
+    assert!(
+        matches!(err_drain, Err(IngressError::AccountingPersistenceUnavailable)),
+        "wait_for_accounting_drain must fail closed when persistence fails"
+    );
+
+    // 100% read-service isolation: status_query_emas_at works even when persistence is broken
+    let (stat_w, _stat_r) = tc.status_query_emas_at(120_000);
+    assert!(stat_w > 0, "status_query_emas_at must decay durable write EMA");
+}
+
+#[tokio::test]
+async fn test_s05_17_full_daemon_lifecycle_genesis_heartbeat_restart_continuity() {
+    let cancel = CancellationToken::new();
+
+    // 1. Setup Observer node
+    let observer = NodeIdentity::generate();
+    let obs_temp = tempdir().unwrap();
+    let obs_db = obs_temp.path().join("obs_daemon.redb");
+    let obs_storage = Arc::new(RedbStorage::open(&obs_db).unwrap());
+    let (obs_engine, _) = DualTierEngine::new(obs_storage.clone());
+
+    // 2. Setup Friend Node Identity
+    let (friend, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine friend");
+    let friend_temp = tempdir().unwrap();
+    let friend_data_dir = friend_temp.path().join("friend_data");
+
+    let pm_obs = Arc::new(PeerManager::with_f2f(vec![], vec![*friend.node_pubkey()]));
+    pm_obs.set_storage(Arc::downgrade(&obs_storage));
+    pm_obs.set_engine(&obs_engine);
+    pm_obs.set_min_work_floor_for_test(1);
+
+    let obs_handler = Arc::new(NodeRequestHandler::with_peer_manager(
+        obs_engine.clone(),
+        obs_storage.clone(),
+        observer.clone(),
+        pm_obs.clone(),
+    ));
+
+    let receiver = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &observer,
+        pm_obs.clone(),
+        obs_handler,
+        cancel.clone(),
+    )
+    .expect("bind receiver");
+    receiver.spawn_accept_loop();
+    let receiver_addr = receiver.local_addr().expect("receiver addr");
+
+    // Configure friend's NodeConfig pointing to observer as F2F friend
+    let mut config = NodeConfig::default();
+    config.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config.network.simulation_mode = true;
+    config.storage.data_dir = friend_data_dir.clone();
+    let client_token = "f2f_0123456789abcdef0123456789abcdef";
+    config.f2f.tokens = vec![client_token.to_string()];
+    config.f2f.peers = vec![format!("{}@{}", observer.public_key_hex(), receiver_addr)];
+    config.f2f.trusted_pubkeys = vec![observer.public_key_hex()];
+
+    // 3. Full Daemon Lifecycle Phase 1: Boot NodeDaemon 1 with bootstrap_new_region()
+    let cancel_d1 = CancellationToken::new();
+    let (bound_tx1, bound_rx1) = tokio::sync::oneshot::channel::<BoundAddrs>();
+    let daemon1 = NodeDaemon::with_bound_sender(
+        config.clone(),
+        friend.clone(),
+        cancel_d1.clone(),
+        bound_tx1,
+    )
+    .bootstrap_new_region();
+    let daemon1_handle = tokio::spawn(async move { daemon1.run().await });
+    let bound1 = bound_rx1.await.expect("daemon1 bound");
+
+    // Register friend's actual bound P2P address with the observer
+    pm_obs.register_f2f_friend(*friend.node_pubkey(), Some(bound1.p2p_addr)).await;
+
+    // HTTP Genesis Registration via POST /v1/lock with valid client token in X-Peer-Token header
+    let now_ms = test_now_ms();
+    let genesis = make_test_hmc_genesis([0x88; 32], now_ms + 100_000, friend.signing_key());
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("http://{}/v1/lock", bound1.rpc_addr))
+        .header("X-Peer-Token", client_token)
+        .json(&genesis)
+        .send()
+        .await
+        .expect("send genesis request");
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+
+    // Wait for the running daemon's real QUIC heartbeat to reach the observer
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if pm_obs.get_node_write_evidence(friend.node_pubkey()).await.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let ev1 = pm_obs
+        .get_node_write_evidence(friend.node_pubkey())
+        .await
+        .expect("observer must receive initial heartbeat evidence from daemon 1");
+    assert!(
+        ev1.declared_write_ema_micro_bj > 0,
+        "Genesis registration must produce non-zero write EMA in heartbeat"
+    );
+    assert!(
+        !pm_obs.is_banned(friend.node_pubkey()).await,
+        "Friend daemon must not be banned on initial heartbeat"
+    );
+
+    // 4. Abrupt / cancelled daemon stop
+    cancel_d1.cancel();
+    let res1 = daemon1_handle.await.expect("join daemon1");
+    assert!(res1.is_ok(), "daemon1 shutdown must complete cleanly, got {:?}", res1);
+
+    // 5. Full Daemon Lifecycle Phase 2: Boot new NodeDaemon on reopened DB (no bootstrap_new_region!)
+    let cancel_d2 = CancellationToken::new();
+    let (bound_tx2, bound_rx2) = tokio::sync::oneshot::channel::<BoundAddrs>();
+    let daemon2 = NodeDaemon::with_bound_sender(
+        config.clone(),
+        friend.clone(),
+        cancel_d2.clone(),
+        bound_tx2,
+    );
+    let daemon2_handle = tokio::spawn(async move { daemon2.run().await });
+    let bound2 = bound_rx2.await.expect("daemon2 bound");
+
+    // Register friend's new P2P address on observer
+    pm_obs.register_f2f_friend(*friend.node_pubkey(), Some(bound2.p2p_addr)).await;
+
+    // Wait for daemon 2 to emit next real QUIC heartbeat with persisted, decayed EMA
+    let deadline2 = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut ev2 = None;
+    while tokio::time::Instant::now() < deadline2 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Some(ev) = pm_obs.get_node_write_evidence(friend.node_pubkey()).await {
+            if ev.timestamp_ms > ev1.timestamp_ms {
+                ev2 = Some(ev);
+                break;
+            }
+        }
+    }
+    assert!(
+        ev2.is_some(),
+        "Observer must receive second heartbeat from restarted daemon 2 on reopened DB"
+    );
+    assert!(
+        !pm_obs.is_banned(friend.node_pubkey()).await,
+        "Friend daemon must NOT be banned after restart with decayed EMA from reopened storage"
+    );
+
+    cancel_d2.cancel();
+    let res2 = daemon2_handle.await.expect("join daemon2");
+    assert!(res2.is_ok(), "daemon2 shutdown must complete cleanly, got {:?}", res2);
+}
+
 
 
 

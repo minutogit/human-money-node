@@ -20,7 +20,7 @@ use humoco_node::{
     daemon::{BoundAddrs, NodeDaemon, ShardReadinessManager},
     error::NodeError,
     identity::NodeIdentity,
-    network::{BoxFuture, DefaultRequestHandler, HeartbeatWirePayload, PeerManager, QuicTransport, RequestHandler},
+    network::{BoxFuture, DefaultRequestHandler, HeartbeatWirePayload, NodeRequestHandler, PeerManager, QuicTransport, RequestHandler},
     storage::{DualTierEngine, RedbStorage},
 };
 use humoco_sim_core::wire::{MsgType, WireHeader};
@@ -534,7 +534,7 @@ async fn test_persisted_ticket_observations_survive_restart_while_new_tickets_in
 
     // Verify snapshot_qualified_tickets only includes qualified mature nodes
     let snap = pm.snapshot_qualified_tickets().await;
-    let snap_pks: HashSet<[u8; 32]> = snap.into_iter().map(|(pk, _)| pk).collect();
+    let snap_pks: HashSet<[u8; 32]> = snap.into_iter().map(|(pk, ..)| pk).collect();
     assert!(snap_pks.contains(qualified_peer.node_pubkey()), "Qualified peer must be in snapshot");
     assert!(!snap_pks.contains(unqualified_old_peer.node_pubkey()), "Unqualified old peer must NOT be in snapshot");
     assert!(!snap_pks.contains(young_peer.node_pubkey()), "Young peer must NOT be in snapshot");
@@ -741,7 +741,7 @@ async fn test_real_quic_heartbeat_persisted_ticket_eligibility() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         let snap = pm_local.snapshot_qualified_tickets().await;
-        if snap.iter().any(|(pk, _)| pk == qualified_peer.node_pubkey()) {
+        if snap.iter().any(|(pk, ..)| pk == qualified_peer.node_pubkey()) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1102,5 +1102,443 @@ async fn test_s06_10_dormant_remote_ticket_retention_60_days_and_restart() {
     );
 
     cancel.cancel();
+}
+
+#[tokio::test]
+async fn test_s06_11_periodic_ticket_persistence_preserves_last_seen_and_retention_boundary() {
+    let cancel = CancellationToken::new();
+
+    let observer = NodeIdentity::generate();
+    let relay = NodeIdentity::generate();
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("s06_11.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (obs_engine, _) = DualTierEngine::new(storage.clone());
+
+    let pm_obs = Arc::new(PeerManager::with_f2f(vec![], vec![*relay.node_pubkey()]));
+    pm_obs.set_storage(Arc::downgrade(&storage));
+    pm_obs.set_engine(&obs_engine);
+    pm_obs.set_min_work_floor_for_test(1);
+
+    let pm_rel = Arc::new(PeerManager::with_f2f(vec![], vec![*observer.node_pubkey()]));
+    pm_rel.set_min_work_floor_for_test(1);
+
+    let receiver = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &observer,
+        pm_obs.clone(),
+        Arc::new(NodeRequestHandler::with_peer_manager(
+            obs_engine.clone(),
+            storage.clone(),
+            observer.clone(),
+            pm_obs.clone(),
+        )),
+        cancel.clone(),
+    )
+    .expect("bind receiver");
+
+    let sender = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &relay,
+        pm_rel.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind sender");
+
+    let receiver_addr = receiver.local_addr().expect("receiver addr");
+    let sender_addr = sender.local_addr().expect("sender addr");
+
+    pm_obs.register_f2f_friend(*relay.node_pubkey(), Some(sender_addr)).await;
+    pm_rel.register_f2f_friend(*observer.node_pubkey(), Some(receiver_addr)).await;
+
+    receiver.spawn_accept_loop();
+    sender.spawn_accept_loop();
+
+    let _conn = sender
+        .connect_peer_unchecked(receiver_addr)
+        .await
+        .expect("connect");
+
+    // 1. Remote tickets
+    let (origin, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine origin");
+    let origin_addr: SocketAddr = "127.0.0.1:32010".parse().unwrap();
+
+    let (retained_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine retained");
+    let retained_addr: SocketAddr = "127.0.0.1:32011".parse().unwrap();
+
+    let (direct_friend_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine friend");
+    let friend_addr: SocketAddr = "127.0.0.1:32012".parse().unwrap();
+    pm_obs.register_f2f_friend(*direct_friend_peer.node_pubkey(), Some(friend_addr)).await;
+
+    let (observed_peer, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_750_000_000, Some(50))
+        .expect("mine observed");
+    let observed_addr: SocketAddr = "127.0.0.1:32013".parse().unwrap();
+
+    // 2. Controlled initial time: seed qualified states
+    let base_time_ms = pm_obs.net_time_ms();
+    let fifty_nine_days_ms = 59 * 86_400 * 1000;
+    let fifty_nine_days_ago_ms = base_time_ms.saturating_sub(fifty_nine_days_ms);
+    let age_59d = Duration::from_secs(59 * 86_400 + 25 * 3600);
+
+    // Origin: last seen 59 days ago
+    pm_obs.seed_persisted_ticket_state_with_last_seen(
+        *origin.node_pubkey(),
+        *origin.hrw_routing_id(),
+        age_59d,
+        true,
+        fifty_nine_days_ago_ms,
+    );
+    pm_obs
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *origin.node_pubkey(),
+            *origin.hrw_routing_id(),
+            origin_addr,
+            1,
+            Some(sender_addr),
+            origin.work_score(),
+            true,
+        )
+        .await;
+    pm_obs
+        .set_last_seen_for_test(
+            origin.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(59 * 86_400),
+        )
+        .await;
+
+    // Retained peer: 57 days ago (< 60d after +2d)
+    let fifty_seven_days_ms = 57 * 86_400 * 1000;
+    let fifty_seven_days_ago_ms = base_time_ms.saturating_sub(fifty_seven_days_ms);
+    let age_57d = Duration::from_secs(57 * 86_400 + 25 * 3600);
+    pm_obs.seed_persisted_ticket_state_with_last_seen(
+        *retained_peer.node_pubkey(),
+        *retained_peer.hrw_routing_id(),
+        age_57d,
+        true,
+        fifty_seven_days_ago_ms,
+    );
+    pm_obs
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *retained_peer.node_pubkey(),
+            *retained_peer.hrw_routing_id(),
+            retained_addr,
+            1,
+            Some(sender_addr),
+            retained_peer.work_score(),
+            true,
+        )
+        .await;
+    pm_obs
+        .set_last_seen_for_test(
+            retained_peer.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(57 * 86_400),
+        )
+        .await;
+
+    // Direct friend: 65 days ago (>60d, <365d)
+    let sixty_five_days_ms = 65 * 86_400 * 1000;
+    let sixty_five_days_ago_ms = base_time_ms.saturating_sub(sixty_five_days_ms);
+    let age_65d = Duration::from_secs(65 * 86_400 + 25 * 3600);
+    pm_obs.seed_persisted_ticket_state_with_last_seen(
+        *direct_friend_peer.node_pubkey(),
+        *direct_friend_peer.hrw_routing_id(),
+        age_65d,
+        true,
+        sixty_five_days_ago_ms,
+    );
+    pm_obs
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *direct_friend_peer.node_pubkey(),
+            *direct_friend_peer.hrw_routing_id(),
+            friend_addr,
+            0,
+            None,
+            direct_friend_peer.work_score(),
+            true,
+        )
+        .await;
+    pm_obs
+        .set_last_seen_for_test(
+            direct_friend_peer.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(65 * 86_400),
+        )
+        .await;
+
+    // Observed peer: 10 days ago
+    let ten_days_ms = 10 * 86_400 * 1000;
+    let ten_days_ago_ms = base_time_ms.saturating_sub(ten_days_ms);
+    let age_10d = Duration::from_secs(10 * 86_400 + 25 * 3600);
+    pm_obs.seed_persisted_ticket_state_with_last_seen(
+        *observed_peer.node_pubkey(),
+        *observed_peer.hrw_routing_id(),
+        age_10d,
+        true,
+        ten_days_ago_ms,
+    );
+    pm_obs
+        .learn_node_from_gossip_with_hrw_work_and_auth(
+            *observed_peer.node_pubkey(),
+            *observed_peer.hrw_routing_id(),
+            observed_addr,
+            1,
+            Some(sender_addr),
+            observed_peer.work_score(),
+            true,
+        )
+        .await;
+    pm_obs
+        .set_last_seen_for_test(
+            observed_peer.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(10 * 86_400),
+        )
+        .await;
+
+    // 3. Execute periodic maintenance persistence tick
+    pm_obs
+        .persist_periodic_ticket_observations(storage.clone(), None)
+        .await
+        .expect("persist observations");
+
+    // S06-11 Invariant: on-disk last_seen_ms in RedbStorage must NOT be artificially advanced to ticker execution time!
+    let records = storage
+        .all_ticket_observations()
+        .expect("read all observations");
+    let origin_record = records
+        .iter()
+        .find(|(pk, ..)| pk == origin.node_pubkey())
+        .expect("origin ticket record in storage");
+    let origin_disk_last_seen = origin_record.3;
+    assert!(
+        origin_disk_last_seen <= fifty_nine_days_ago_ms + 1000,
+        "S06-11: On-disk last_seen_ms must NOT be artificially advanced to ticker execution time! Got {}, expected <= {}",
+        origin_disk_last_seen,
+        fifty_nine_days_ago_ms + 1000
+    );
+
+    // 4. Close and reopen RedbStorage, advance controlled network time by 2 days (actual absence = 61 days > 60d)
+    cancel.cancel();
+    receiver.close();
+    receiver.drain_tasks().await;
+    sender.close();
+    sender.drain_tasks().await;
+    drop(receiver);
+    drop(sender);
+    drop(pm_obs);
+    drop(obs_engine);
+    drop(storage);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let cancel2 = CancellationToken::new();
+    let reopened_storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (reopened_engine, _) = DualTierEngine::new(reopened_storage.clone());
+    let pm_obs2 = Arc::new(PeerManager::with_f2f(
+        vec![],
+        vec![*relay.node_pubkey(), *direct_friend_peer.node_pubkey()],
+    ));
+    pm_obs2.set_storage(Arc::downgrade(&reopened_storage));
+    pm_obs2.set_engine(&reopened_engine);
+    pm_obs2.set_min_work_floor_for_test(1);
+
+    // Advance controlled time by 2 days
+    let two_days_ms = 2 * 86_400 * 1000;
+    pm_obs2.clock().advance_time_for_test(two_days_ms);
+    let boot_now_ms = pm_obs2.net_time_ms();
+
+    // Restore via restore_persisted_ticket_observations
+    pm_obs2
+        .restore_persisted_ticket_observations(&reopened_storage, boot_now_ms, None)
+        .await
+        .expect("restore observations");
+
+    // Rebind QUIC for delivery
+    let receiver2 = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &observer,
+        pm_obs2.clone(),
+        Arc::new(NodeRequestHandler::with_peer_manager(
+            reopened_engine.clone(),
+            reopened_storage.clone(),
+            observer.clone(),
+            pm_obs2.clone(),
+        )),
+        cancel2.clone(),
+    )
+    .expect("bind receiver2");
+
+    let sender2 = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &relay,
+        pm_rel.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel2.clone(),
+    )
+    .expect("bind sender2");
+
+    let receiver2_addr = receiver2.local_addr().unwrap();
+    let sender2_addr = sender2.local_addr().unwrap();
+    pm_obs2.register_f2f_friend(*relay.node_pubkey(), Some(sender2_addr)).await;
+    pm_rel.register_f2f_friend(*observer.node_pubkey(), Some(receiver2_addr)).await;
+
+    receiver2.spawn_accept_loop();
+    sender2.spawn_accept_loop();
+    let conn2 = sender2.connect_peer_unchecked(receiver2_addr).await.expect("connect2");
+
+    // Deliver 1 fresh origin-signed heartbeat over real QUIC through relay
+    let mut hb_origin = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *origin.node_pubkey(),
+        addr: origin_addr,
+        timestamp_ms: pm_obs2.net_time_ms(),
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: origin.nonce(),
+        hrw_routing_id: *origin.hrw_routing_id(),
+        ticket_epoch_t0: origin.t0(),
+        ttl: 15,
+    };
+    hb_origin.sign_origin(&origin, pm_obs2.net_time_ms(), humoco_sim_core::types::NetworkId::Mainnet);
+    let bytes_orig = bincode::serialize(&hb_origin).unwrap();
+    let mut hdr_orig = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, bytes_orig.len() as u32);
+    hdr_orig.reserved = 1; // relayed
+    sender2.send_unidirectional(&conn2, &hdr_orig, &bytes_orig).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // S06-11 Invariant: Returning expired remote identity (61 days absence) must NOT reuse prior qualification!
+    assert!(
+        !pm_obs2.is_hrw_eligible(origin.node_pubkey()).await,
+        "S06-11: Returning remote non-friend absent for 61d (>60d retention) must NOT reuse prior qualification after 1 heartbeat"
+    );
+
+    // Control 1: Retained-history control within 60 days (57d + 2d = 59d)
+    let mut hb_retained = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *retained_peer.node_pubkey(),
+        addr: retained_addr,
+        timestamp_ms: pm_obs2.net_time_ms(),
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: retained_peer.nonce(),
+        hrw_routing_id: *retained_peer.hrw_routing_id(),
+        ticket_epoch_t0: retained_peer.t0(),
+        ttl: 15,
+    };
+    hb_retained.sign_origin(&retained_peer, pm_obs2.net_time_ms(), humoco_sim_core::types::NetworkId::Mainnet);
+    let bytes_ret = bincode::serialize(&hb_retained).unwrap();
+    let mut hdr_ret = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, bytes_ret.len() as u32);
+    hdr_ret.reserved = 1;
+    sender2.send_unidirectional(&conn2, &hdr_ret, &bytes_ret).await.unwrap();
+
+    let deadline_ret = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline_ret {
+        if pm_obs2.is_hrw_eligible(retained_peer.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        pm_obs2.is_hrw_eligible(retained_peer.node_pubkey()).await,
+        "Control 1: Remote peer within 60-day retention (59d) must retain qualification upon fresh heartbeat"
+    );
+
+    // Control 2: Direct-friend control (>60d, <365d -> 67d)
+    let mut hb_friend = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *direct_friend_peer.node_pubkey(),
+        addr: friend_addr,
+        timestamp_ms: pm_obs2.net_time_ms(),
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: direct_friend_peer.nonce(),
+        hrw_routing_id: *direct_friend_peer.hrw_routing_id(),
+        ticket_epoch_t0: direct_friend_peer.t0(),
+        ttl: 15,
+    };
+    hb_friend.sign_origin(&direct_friend_peer, pm_obs2.net_time_ms(), humoco_sim_core::types::NetworkId::Mainnet);
+    let bytes_fr = bincode::serialize(&hb_friend).unwrap();
+    let mut hdr_fr = WireHeader::new(MsgType::Heartbeat as u16, 3, 0, 0, bytes_fr.len() as u32);
+    hdr_fr.reserved = 1;
+    sender2.send_unidirectional(&conn2, &hdr_fr, &bytes_fr).await.unwrap();
+
+    let deadline_fr = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline_fr {
+        if pm_obs2.is_hrw_eligible(direct_friend_peer.node_pubkey()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        pm_obs2.is_hrw_eligible(direct_friend_peer.node_pubkey()).await,
+        "Control 2: Direct friend within 365-day retention (67d) must retain qualification"
+    );
+
+    // Control 3: Genuine accepted observation control legitimately advances last_seen_ms
+    let fresh_obs_time_ms = pm_obs2.net_time_ms();
+    let mut hb_obs = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *observed_peer.node_pubkey(),
+        addr: observed_addr,
+        timestamp_ms: fresh_obs_time_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: observed_peer.nonce(),
+        hrw_routing_id: *observed_peer.hrw_routing_id(),
+        ticket_epoch_t0: observed_peer.t0(),
+        ttl: 15,
+    };
+    hb_obs.sign_origin(&observed_peer, fresh_obs_time_ms, humoco_sim_core::types::NetworkId::Mainnet);
+    let bytes_obs = bincode::serialize(&hb_obs).unwrap();
+    let mut hdr_obs = WireHeader::new(MsgType::Heartbeat as u16, 4, 0, 0, bytes_obs.len() as u32);
+    hdr_obs.reserved = 1;
+    sender2.send_unidirectional(&conn2, &hdr_obs, &bytes_obs).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    pm_obs2
+        .persist_periodic_ticket_observations(reopened_storage.clone(), None)
+        .await
+        .expect("persist observations after fresh observation");
+
+    let recs_after = reopened_storage
+        .all_ticket_observations()
+        .expect("read all observations after fresh");
+    let obs_rec = recs_after
+        .iter()
+        .find(|(pk, ..)| pk == observed_peer.node_pubkey())
+        .expect("observed peer record");
+    let obs_disk_last_seen = obs_rec.3;
+    assert!(
+        obs_disk_last_seen >= fresh_obs_time_ms.saturating_sub(1000)
+            && obs_disk_last_seen <= fresh_obs_time_ms.saturating_add(1000),
+        "Control 3: Genuine accepted observation must legitimately advance last_seen_ms on persistence tick! Got {}, expected around {}",
+        obs_disk_last_seen,
+        fresh_obs_time_ms
+    );
+
+    cancel2.cancel();
 }
 

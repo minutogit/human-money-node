@@ -745,7 +745,7 @@ async fn test_s06_09_initial_admission_aged_hourly_slots_window_expiration() {
 
     let snap = manager.snapshot_qualified_tickets().await;
     assert!(
-        !snap.iter().any(|(pk, _)| pk == newcomer.node_pubkey()),
+        !snap.iter().any(|(pk, ..)| pk == newcomer.node_pubkey()),
         "S06-09: Node with only 7 valid slots in current 24h window must be EXCLUDED from snapshot_qualified_tickets"
     );
 
@@ -788,7 +788,7 @@ async fn test_s06_09_initial_admission_aged_hourly_slots_window_expiration() {
 
     let snap_admitted = manager.snapshot_qualified_tickets().await;
     assert!(
-        snap_admitted.iter().any(|(pk, _)| pk == newcomer.node_pubkey()),
+        snap_admitted.iter().any(|(pk, ..)| pk == newcomer.node_pubkey()),
         "S06-09: Positive control with 8 current slots MUST be in snapshot_qualified_tickets"
     );
 

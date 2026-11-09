@@ -144,6 +144,7 @@ pub type VipCredentialRecord = ([u8; 32], [u8; 32]);
 /// and sufficient fixed-point write/read EMA continuity anchors across restarts (S05-11, S05-15).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PersistedIngressAccountingState {
+    pub checkpoint_seq: u64,
     pub current_day: u64,
     pub last_epoch_seq: u64,
     pub reserved_epoch_seq: u64,
@@ -154,6 +155,55 @@ pub struct PersistedIngressAccountingState {
     pub last_write_ema_sec: Option<u64>,
     pub read_ema_scaled: u128,
     pub last_read_ema_sec: Option<u64>,
+}
+
+impl PersistedIngressAccountingState {
+    /// Determines whether this snapshot supersedes an existing persisted state (S05-17).
+    #[inline]
+    pub fn supersedes(&self, existing: &Self) -> bool {
+        // 1. Truly identical snapshot -> idempotent no-op, no overwrite needed
+        if self == existing {
+            return false;
+        }
+
+        // 2. Envelope tuple: never regress envelope high-water mark
+        let self_env = (
+            self.current_day,
+            self.last_epoch_seq,
+            self.reserved_epoch_seq,
+            self.cumulative_micro_byte_years,
+            self.last_timestamp_ms,
+        );
+        let existing_env = (
+            existing.current_day,
+            existing.last_epoch_seq,
+            existing.reserved_epoch_seq,
+            existing.cumulative_micro_byte_years,
+            existing.last_timestamp_ms,
+        );
+        if self_env < existing_env {
+            return false;
+        }
+
+        // 3. Reject stale concurrent snapshot even if its raw EMA is larger
+        if self.checkpoint_seq < existing.checkpoint_seq {
+            return false;
+        }
+
+        // 4. Never allow EMA time anchors to regress
+        if (existing.last_write_ema_sec.is_some() && self.last_write_ema_sec < existing.last_write_ema_sec)
+            || (existing.last_read_ema_sec.is_some() && self.last_read_ema_sec < existing.last_read_ema_sec)
+        {
+            return false;
+        }
+
+        // 5. Raw EMA values decrease under lawful physical-time decay, so do NOT compare raw maxima.
+        // Accept when checkpoint_seq advanced, envelope advanced, or time anchor advanced.
+        self.checkpoint_seq > existing.checkpoint_seq
+            || self_env > existing_env
+            || self.last_write_ema_sec > existing.last_write_ema_sec
+            || self.last_read_ema_sec > existing.last_read_ema_sec
+    }
 }
 
 /// Node-local original signing protection. Never included in shard synchronization.
@@ -1101,7 +1151,7 @@ impl RedbStorage {
         }
     }
 
-    /// Durably persists ingress accounting state with monotonic high-water check (S05-11, S05-15).
+    /// Durably persists ingress accounting state with monotonic high-water check (S05-11, S05-15, S05-17).
     pub fn store_ingress_accounting_state(
         &self,
         state: &PersistedIngressAccountingState,
@@ -1113,17 +1163,7 @@ impl RedbStorage {
             if let Some(existing) = table.get(0u8)? {
                 let existing_state: PersistedIngressAccountingState =
                     bincode::deserialize(existing.value())?;
-                // Monotonic high-water check so older batches can never regress stored accounting state
-                let is_older_or_equal = state.current_day < existing_state.current_day
-                    || (state.current_day == existing_state.current_day
-                        && (state.last_epoch_seq < existing_state.last_epoch_seq
-                            || (state.last_epoch_seq == existing_state.last_epoch_seq
-                                && (state.reserved_epoch_seq < existing_state.reserved_epoch_seq
-                                    || (state.reserved_epoch_seq == existing_state.reserved_epoch_seq
-                                        && (state.cumulative_micro_byte_years < existing_state.cumulative_micro_byte_years
-                                            || (state.cumulative_micro_byte_years == existing_state.cumulative_micro_byte_years
-                                                && state.last_timestamp_ms <= existing_state.last_timestamp_ms)))))));
-                if is_older_or_equal {
+                if !state.supersedes(&existing_state) {
                     return Ok(());
                 }
             }

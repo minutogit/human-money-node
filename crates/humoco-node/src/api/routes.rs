@@ -2146,8 +2146,8 @@ async fn query_status(
                         let idx = (tag_hash[0] as usize) % remote_custodians.len();
                         let (_, addr) = remote_custodians[idx];
                         let parent_lock = tag_hash;
-                        let declared_read_ema = state.tier_controller.current_read_ema_credits();
-                        let declared_write_ema = state.tier_controller.current_write_ema_micro_bj();
+                        let (declared_write_ema, declared_read_ema) =
+                            state.tier_controller.status_query_emas_at(now_ms);
                         let sender_pubkey = self_pubkey;
                         let digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
                             state.network_id,

@@ -727,7 +727,12 @@ async fn test_s06_06_replacement_ticket_promotion_order_invariance_production_ru
         let info_after = pm.get_known_node_info(&pk).await.unwrap();
         let effective_hrw = pm.get_effective_hrw_routing_id(&pk).await;
         let (committee, _, total) = pm.shard_committee(local_pk, local_hrw, 42).await;
-        let qualified_snapshot = pm.snapshot_qualified_tickets().await;
+        let qualified_snapshot = pm
+            .snapshot_qualified_tickets()
+            .await
+            .into_iter()
+            .map(|(pk, hrw, ..)| (pk, hrw))
+            .collect();
 
         results.push((
             mode,

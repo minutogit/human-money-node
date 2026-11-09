@@ -199,6 +199,7 @@ pub struct KnownNodeInfo {
     pub(crate) obs_24h_mask: u32,
     pub(crate) initial_admission_qualified: bool,
     pub last_seen_ms: u64,
+    pub first_seen_ms: u64,
     pub last_write_evidence: Option<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
     pub last_read_evidence: Option<humoco_sim_core::fraud::IngressEnvelopeEvidence>,
 }
@@ -237,6 +238,7 @@ impl KnownNodeInfo {
             obs_24h_mask: 0,
             initial_admission_qualified: false,
             last_seen_ms: 0,
+            first_seen_ms: 0,
             last_write_evidence: None,
             last_read_evidence: None,
         }
@@ -270,6 +272,7 @@ impl KnownNodeInfo {
             obs_24h_mask: 0,
             initial_admission_qualified: false,
             last_seen_ms: 0,
+            first_seen_ms: 0,
             last_write_evidence: None,
             last_read_evidence: None,
         }
@@ -1414,8 +1417,8 @@ impl PeerManager {
         }
     }
 
-    /// Snapshots active qualified `(node_pubkey, hrw_routing_id)` pairs for periodic persistence (S06-09, S06-10).
-    pub async fn snapshot_qualified_tickets(&self) -> Vec<([u8; 32], [u8; 32])> {
+    /// Snapshots active qualified ticket observation records for periodic persistence (S06-09, S06-10, S06-11).
+    pub async fn snapshot_qualified_tickets(&self) -> Vec<crate::storage::db::TicketObservationRecord> {
         let current_hour = self.net_time_ms() / 3_600_000;
         let friends = self.f2f_friends.read().await.clone();
         let now = Instant::now();
@@ -1445,8 +1448,129 @@ impl PeerManager {
                 }
                 info.is_initial_admission_qualified_at_hour(current_hour)
             })
-            .map(|(pk, info)| (*pk, info.hrw_routing_id))
+            .map(|(pk, info)| {
+                let last_seen_ms = if info.last_seen_ms > 0 {
+                    info.last_seen_ms
+                } else {
+                    now_ms.saturating_sub(
+                        u64::try_from(now.saturating_duration_since(info.last_seen).as_millis())
+                            .unwrap_or(u64::MAX),
+                    )
+                };
+                let first_seen_from_age = now_ms.saturating_sub(
+                    u64::try_from(info.observed_age().as_millis()).unwrap_or(u64::MAX),
+                );
+                let first_seen_ms = if info.first_seen_ms > 0 {
+                    info.first_seen_ms.min(first_seen_from_age)
+                } else {
+                    first_seen_from_age
+                };
+                (
+                    *pk,
+                    info.hrw_routing_id,
+                    first_seen_ms,
+                    last_seen_ms,
+                    info.is_initial_admission_qualified_at_hour(current_hour),
+                )
+            })
             .collect()
+    }
+
+    /// Restores persisted ticket observations from storage on startup.
+    pub async fn restore_persisted_ticket_observations(
+        &self,
+        storage: &crate::storage::RedbStorage,
+        boot_now_ms: u64,
+        local_ticket: Option<([u8; 32], [u8; 32])>,
+    ) -> Result<(std::time::Duration, bool), crate::storage::StorageError> {
+        let mut local_prior_age = std::time::Duration::ZERO;
+        let mut local_prior_qualified = false;
+        let sim_mode = self.is_simulation_mode();
+        let observations = storage.all_ticket_observations()?;
+        for (pk, hrw, first_seen_ms, last_seen_ms, admission_qualified) in &observations {
+            let is_shortcut = *hrw == *blake3::hash(pk).as_bytes()
+                || *hrw == *pk
+                || *hrw == [0u8; 32];
+            if !sim_mode && is_shortcut {
+                continue;
+            }
+            let is_direct_friend = self.is_f2f_friend(pk).await;
+            let retention_ms = if is_direct_friend {
+                crate::network::manager::DIRECT_FRIEND_RETENTION_MS
+            } else {
+                crate::network::manager::REMOTE_METADATA_RETENTION_MS
+            };
+            let elapsed_inactivity = boot_now_ms.saturating_sub(*last_seen_ms);
+            if elapsed_inactivity > retention_ms {
+                tracing::debug!(
+                    node = %hex::encode(pk),
+                    elapsed_ms = elapsed_inactivity,
+                    retention_ms,
+                    "Persisted ticket observation exceeded retention window; expiring on startup"
+                );
+                continue;
+            }
+            let age = std::time::Duration::from_millis(
+                boot_now_ms.saturating_sub(*first_seen_ms),
+            );
+            self.seed_persisted_ticket_state_with_last_seen(
+                *pk,
+                *hrw,
+                age,
+                *admission_qualified,
+                *last_seen_ms,
+            );
+            if let Some((local_pk, local_hrw)) = local_ticket {
+                if *pk == local_pk && *hrw == local_hrw {
+                    local_prior_age = age;
+                    local_prior_qualified = *admission_qualified;
+                }
+            }
+        }
+        if !observations.is_empty() {
+            tracing::info!(
+                restored = observations.len(),
+                "Restored persisted HRW ticket observations into PeerManager"
+            );
+        }
+        Ok((local_prior_age, local_prior_qualified))
+    }
+
+    /// Persists periodic qualified ticket observations into storage (S06-11).
+    pub async fn persist_periodic_ticket_observations(
+        &self,
+        storage: std::sync::Arc<crate::storage::RedbStorage>,
+        self_ticket: Option<([u8; 32], [u8; 32])>,
+    ) -> Result<usize, crate::error::NodeError> {
+        let now_ms = self.net_time_ms();
+        let mut qualified_tickets = self.snapshot_qualified_tickets().await;
+        if let Some((self_pk, self_hrw)) = self_ticket {
+            if self.local_ticket_is_mature() {
+                let local_first_seen_ms = self.local_ticket_first_seen_ms(now_ms);
+                qualified_tickets.push((self_pk, self_hrw, local_first_seen_ms, now_ms, true));
+            }
+        }
+        let count = qualified_tickets.len();
+        if count > 0 {
+            tokio::task::spawn_blocking(move || {
+                storage.record_ticket_observation_records(&qualified_tickets)
+            })
+            .await
+            .map_err(|e| crate::error::NodeError::Daemon(format!("ticket persist task join error: {e}")))?
+            .map_err(crate::error::NodeError::Storage)?;
+        }
+        Ok(count)
+    }
+
+    /// Computes the estimated first seen timestamp in ms for the local ticket observation.
+    pub fn local_ticket_first_seen_ms(&self, now_ms: u64) -> u64 {
+        if let Ok(guard) = self.local_ticket_observation.lock() {
+            if let Some((_pk, _hrw, since, prior_age)) = *guard {
+                let age = prior_age.saturating_add(since.elapsed());
+                return now_ms.saturating_sub(u64::try_from(age.as_millis()).unwrap_or(u64::MAX));
+            }
+        }
+        now_ms
     }
 
     /// Sets the persistent storage handle for atomic slashing evidence and ban commits.
@@ -2484,6 +2608,7 @@ impl PeerManager {
                     // Reset dormant admission history per Spec 07 §4 / INV-0705:
                     // Returning remote identity must re-accumulate newcomer observations
                     entry.first_seen = now;
+                    entry.first_seen_ms = self.net_time_ms();
                     entry.pre_boot_age = Duration::ZERO;
                     entry.initial_admission_qualified = false;
                     entry.latest_obs_hour = None;
@@ -2499,6 +2624,9 @@ impl PeerManager {
                     entry.work_score = work_score;
                     entry.pre_boot_age = prior_age;
                     entry.first_seen = now;
+                    entry.first_seen_ms = self.net_time_ms().saturating_sub(
+                        u64::try_from(prior_age.as_millis()).unwrap_or(u64::MAX),
+                    );
                     entry.latest_obs_hour = None;
                     entry.obs_24h_mask = 0;
                     entry.initial_admission_qualified = false;
@@ -2559,6 +2687,10 @@ impl PeerManager {
                     let val = u32::from_le_bytes([hb[0], hb[1], hb[2], hb[3]]);
                     mask = 1 << (val % 32);
                 }
+                let now_ms = self.net_time_ms();
+                let first_seen_ms = now_ms.saturating_sub(
+                    u64::try_from(prior_age.as_millis()).unwrap_or(u64::MAX),
+                );
                 // Newcomer: IMMATURE phase starts unless restored from persisted maturation history
                 nodes.insert(
                     node_pubkey,
@@ -2572,6 +2704,7 @@ impl PeerManager {
                         pending_since: None,
                         incubated_until: None,
                         first_seen: now,
+                        first_seen_ms,
                         pre_boot_age: prior_age,
                         incubation_duration: incubation,
                         last_seen: now,
@@ -2582,7 +2715,7 @@ impl PeerManager {
                         latest_obs_hour: None,
                         obs_24h_mask: 0,
                         initial_admission_qualified,
-                        last_seen_ms: self.net_time_ms(),
+                        last_seen_ms: now_ms,
                         last_write_evidence: None,
                         last_read_evidence: None,
                     },
@@ -2651,17 +2784,6 @@ impl PeerManager {
             .await;
     }
 
-    /// Alias: handle_migration / on_node_id_migration
-    pub async fn handle_node_id_migration(
-        &self,
-        node_pubkey: [u8; 32],
-        new_hrw_routing_id: [u8; 32],
-        addr: SocketAddr,
-    ) {
-        self.learn_node_from_gossip_with_hrw(node_pubkey, new_hrw_routing_id, addr, 0, None)
-            .await;
-    }
-
     /// Returns the effective HRW routing ticket for HRW scoring.
     /// During 24h incubation, the old ticket is used; thereafter the new one.
     /// For IMMATURE (<24h since first_seen), the active ticket is still returned,
@@ -2672,14 +2794,11 @@ impl PeerManager {
         nodes.get(node_pubkey).map(|e| e.hrw_routing_id)
     }
 
-    /// Alias shorthand forms for evaluator compatibility
+    /// Shorthand forms for ticket retrieval
     pub async fn get_hrw_routing_id(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
         self.get_effective_hrw_routing_id(node_pubkey).await
     }
     pub async fn get_active_hrw_routing_id(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
-        self.get_effective_hrw_routing_id(node_pubkey).await
-    }
-    pub async fn hrw_for_node(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
         self.get_effective_hrw_routing_id(node_pubkey).await
     }
 
@@ -2689,12 +2808,6 @@ impl PeerManager {
             .values()
             .map(|n| (n.best_ingress_peer, n.ingress_diversity_mask))
             .collect()
-    }
-    pub async fn effective_hrw_for_scoring(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
-        self.get_effective_hrw_routing_id(node_pubkey).await
-    }
-    pub async fn get_routing_id(&self, node_pubkey: &[u8; 32]) -> Option<[u8; 32]> {
-        self.get_effective_hrw_routing_id(node_pubkey).await
     }
 
     /// Finds a node's permanent NodePubKey given its active HRW routing ticket.
@@ -3725,6 +3838,9 @@ impl PeerManager {
             let mut info = KnownNodeInfo::new(dummy_addr, *node_id, *node_id);
             info.work_score = 0;
             info.incubation_duration = self.effective_incubation_duration();
+            let now_ms = self.net_time_ms();
+            info.first_seen_ms = now_ms;
+            info.last_seen_ms = now_ms;
             info.update_write_evidence(ev);
             known.insert(*node_id, info);
         }
@@ -3743,6 +3859,9 @@ impl PeerManager {
             let mut info = KnownNodeInfo::new(dummy_addr, *node_id, *node_id);
             info.work_score = 0;
             info.incubation_duration = self.effective_incubation_duration();
+            let now_ms = self.net_time_ms();
+            info.first_seen_ms = now_ms;
+            info.last_seen_ms = now_ms;
             info.update_read_evidence(ev);
             known.insert(*node_id, info);
         }

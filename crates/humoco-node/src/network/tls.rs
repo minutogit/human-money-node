@@ -346,13 +346,6 @@ pub fn build_quinn_client_config_with_identity_and_network(
     Ok(client_config)
 }
 
-/// Alias for `build_quinn_client_config_with_identity_and_network` (compatibility).
-pub fn build_quinn_client_config_with_identity_with_network(
-    identity: &NodeIdentity,
-    network_id: humoco_sim_core::types::NetworkId,
-) -> Result<quinn::ClientConfig, NodeError> {
-    build_quinn_client_config_with_identity_and_network(identity, network_id)
-}
 
 /// Builds a Quinn ClientConfig for connecting to P2P peers without client authentication (fallback).
 pub fn build_quinn_client_config() -> Result<quinn::ClientConfig, NodeError> {

@@ -108,6 +108,13 @@ struct IngressAccountingState {
     prev_day_final_bytes: u64,
     persisted_day: u64,
     persisted_reserved_seq: u64,
+    checkpoint_seq: u64,
+    target_reserved_seq: u64,
+    persisted_checkpoint_seq: u64,
+    persisted_write_ema_scaled: u128,
+    persisted_last_write_ema_sec: Option<u64>,
+    persisted_read_ema_scaled: u128,
+    persisted_last_read_ema_sec: Option<u64>,
 }
 
 /// Sealed allocation result returned by `record_declared_usage` (S05-11).
@@ -236,16 +243,7 @@ impl TierController {
                 let mut waiters: Vec<tokio::sync::oneshot::Sender<Result<(), IngressError>>> =
                     vec![first_tx];
                 while let Ok((next_state, next_tx)) = accounting_persist_rx.try_recv() {
-                    let is_next_higher = next_state.current_day > highest.current_day
-                        || (next_state.current_day == highest.current_day
-                            && (next_state.last_epoch_seq > highest.last_epoch_seq
-                                || (next_state.last_epoch_seq == highest.last_epoch_seq
-                                    && (next_state.reserved_epoch_seq > highest.reserved_epoch_seq
-                                        || (next_state.reserved_epoch_seq == highest.reserved_epoch_seq
-                                            && (next_state.cumulative_micro_byte_years > highest.cumulative_micro_byte_years
-                                                || (next_state.cumulative_micro_byte_years == highest.cumulative_micro_byte_years
-                                                    && next_state.last_timestamp_ms >= highest.last_timestamp_ms)))))));
-                    if is_next_higher {
+                    if next_state.supersedes(&highest) {
                         highest = next_state;
                     }
                     waiters.push(next_tx);
@@ -304,7 +302,9 @@ impl TierController {
                 );
 
                 let pre_reserved = start_seq.saturating_add(INGRESS_SEQ_LEASE_BLOCK);
+                let next_checkpoint_seq = st.checkpoint_seq.saturating_add(1);
                 let pre_state = crate::storage::PersistedIngressAccountingState {
+                    checkpoint_seq: next_checkpoint_seq,
                     current_day: start_day,
                     last_epoch_seq: st.last_epoch_seq,
                     reserved_epoch_seq: pre_reserved,
@@ -322,6 +322,13 @@ impl TierController {
                         initial_accounting.epoch_seq = start_seq;
                         initial_accounting.persisted_day = start_day;
                         initial_accounting.persisted_reserved_seq = pre_reserved;
+                        initial_accounting.checkpoint_seq = next_checkpoint_seq;
+                        initial_accounting.target_reserved_seq = pre_reserved;
+                        initial_accounting.persisted_checkpoint_seq = next_checkpoint_seq;
+                        initial_accounting.persisted_write_ema_scaled = st.write_ema_scaled;
+                        initial_accounting.persisted_last_write_ema_sec = st.last_write_ema_sec;
+                        initial_accounting.persisted_read_ema_scaled = st.read_ema_scaled;
+                        initial_accounting.persisted_last_read_ema_sec = st.last_read_ema_sec;
                     }
                     Err(e) => {
                         eprintln!("CRITICAL: Failed to pre-reserve ingress lease block: {:?}", e);
@@ -332,6 +339,7 @@ impl TierController {
             Ok(None) => {
                 let boot_day = pow_engine.now_ms() / (86_400 * 1000);
                 let pre_state = crate::storage::PersistedIngressAccountingState {
+                    checkpoint_seq: 1,
                     current_day: boot_day,
                     last_epoch_seq: 0,
                     reserved_epoch_seq: INGRESS_SEQ_LEASE_BLOCK,
@@ -349,6 +357,13 @@ impl TierController {
                         initial_accounting.epoch_seq = 0;
                         initial_accounting.persisted_day = boot_day;
                         initial_accounting.persisted_reserved_seq = INGRESS_SEQ_LEASE_BLOCK;
+                        initial_accounting.checkpoint_seq = 1;
+                        initial_accounting.target_reserved_seq = INGRESS_SEQ_LEASE_BLOCK;
+                        initial_accounting.persisted_checkpoint_seq = 1;
+                        initial_accounting.persisted_write_ema_scaled = 0;
+                        initial_accounting.persisted_last_write_ema_sec = None;
+                        initial_accounting.persisted_read_ema_scaled = 0;
+                        initial_accounting.persisted_last_read_ema_sec = None;
                     }
                     Err(e) => {
                         eprintln!("CRITICAL: Failed to pre-reserve ingress lease block: {:?}", e);
@@ -515,11 +530,13 @@ impl TierController {
                 state.cumulative_micro_byte_years = 0;
                 state.epoch_seq = 0;
                 state.current_day = incoming_day;
+                state.target_reserved_seq = 0;
             } else if incoming_day < state.current_day && state.epoch_seq == 0 {
                 // If no envelopes have ever been issued, adopt the incoming day (e.g. simulated test time)
                 state.current_day = incoming_day;
                 state.persisted_day = 0;
                 state.persisted_reserved_seq = 0;
+                state.target_reserved_seq = 0;
             }
             let effective_day = state.current_day;
             let effective_ts_ms = now_ms
@@ -544,6 +561,9 @@ impl TierController {
             } else {
                 seq.saturating_add(INGRESS_SEQ_LEASE_BLOCK.saturating_sub(1))
             };
+            state.target_reserved_seq = state.target_reserved_seq.max(target_reserved_seq);
+            state.checkpoint_seq = state.checkpoint_seq.saturating_add(1);
+            let checkpoint_seq = state.checkpoint_seq;
 
             let (
                 dec_write,
@@ -555,6 +575,7 @@ impl TierController {
             ) = thermo.checkpoint_and_export_emas_at(effective_ts_ms / 1000);
 
             let persisted = crate::storage::PersistedIngressAccountingState {
+                checkpoint_seq,
                 current_day: effective_day,
                 last_epoch_seq: seq,
                 reserved_epoch_seq: target_reserved_seq,
@@ -580,13 +601,24 @@ impl TierController {
         };
 
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        permit.send((persisted, ack_tx));
+        permit.send((persisted.clone(), ack_tx));
 
         match ack_rx.await {
             Ok(Ok(())) => {
                 let mut st = self.accounting_state.lock();
-                st.persisted_day = effective_day;
-                st.persisted_reserved_seq = st.persisted_reserved_seq.max(target_reserved_seq);
+                if effective_day > st.persisted_day || st.persisted_day == 0 {
+                    st.persisted_day = effective_day;
+                    st.persisted_reserved_seq = target_reserved_seq;
+                } else if effective_day == st.persisted_day {
+                    st.persisted_reserved_seq = st.persisted_reserved_seq.max(target_reserved_seq);
+                }
+                if persisted.checkpoint_seq >= st.persisted_checkpoint_seq {
+                    st.persisted_checkpoint_seq = persisted.checkpoint_seq;
+                    st.persisted_write_ema_scaled = persisted.write_ema_scaled;
+                    st.persisted_last_write_ema_sec = persisted.last_write_ema_sec;
+                    st.persisted_read_ema_scaled = persisted.read_ema_scaled;
+                    st.persisted_last_read_ema_sec = persisted.last_read_ema_sec;
+                }
             }
             Ok(Err(e)) => {
                 self.accounting_persist_failed.store(true, Ordering::Release);
@@ -610,17 +642,33 @@ impl TierController {
     }
 
     /// Flushes all queued ingress accounting updates to storage and awaits completion.
-    pub async fn wait_for_accounting_drain(&self) {
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    pub async fn wait_for_accounting_drain(&self) -> Result<(), IngressError> {
+        if self.accounting_persist_failed.load(Ordering::Acquire) {
+            return Err(IngressError::AccountingPersistenceUnavailable);
+        }
+        let permit = self
+            .accounting_persist_tx
+            .reserve()
+            .await
+            .map_err(|_| IngressError::AccountingPersistenceUnavailable)?;
+
         let persisted = {
-            let state = self.accounting_state.lock();
+            let mut state = self.accounting_state.lock();
             let thermo = self.thermometer.read().unwrap_or_else(|e| e.into_inner());
             let (write_ema_scaled, last_write_ema_sec, read_ema_scaled, last_read_ema_sec) =
                 thermo.raw_ema_state();
+            state.checkpoint_seq = state.checkpoint_seq.saturating_add(1);
+            let checkpoint_seq = state.checkpoint_seq;
+            let reserved_epoch_seq = state
+                .target_reserved_seq
+                .max(state.persisted_reserved_seq)
+                .max(state.epoch_seq);
+
             crate::storage::PersistedIngressAccountingState {
+                checkpoint_seq,
                 current_day: state.current_day,
                 last_epoch_seq: state.epoch_seq,
-                reserved_epoch_seq: state.persisted_reserved_seq,
+                reserved_epoch_seq,
                 last_timestamp_ms: state.last_timestamp_ms,
                 cumulative_micro_byte_years: state.cumulative_micro_byte_years,
                 prev_day_final_bytes: state.prev_day_final_bytes,
@@ -630,10 +678,130 @@ impl TierController {
                 last_read_ema_sec,
             }
         };
-        if let Ok(permit) = self.accounting_persist_tx.reserve().await {
-            permit.send((persisted, ack_tx));
-            let _ = ack_rx.await;
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        permit.send((persisted.clone(), ack_tx));
+
+        match ack_rx.await {
+            Ok(Ok(())) => {
+                let mut st = self.accounting_state.lock();
+                if persisted.checkpoint_seq >= st.persisted_checkpoint_seq {
+                    st.persisted_checkpoint_seq = persisted.checkpoint_seq;
+                    st.persisted_write_ema_scaled = persisted.write_ema_scaled;
+                    st.persisted_last_write_ema_sec = persisted.last_write_ema_sec;
+                    st.persisted_read_ema_scaled = persisted.read_ema_scaled;
+                    st.persisted_last_read_ema_sec = persisted.last_read_ema_sec;
+                }
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                self.accounting_persist_failed.store(true, Ordering::Release);
+                Err(e)
+            }
+            Err(_) => {
+                self.accounting_persist_failed.store(true, Ordering::Release);
+                Err(IngressError::AccountingPersistenceUnavailable)
+            }
         }
+    }
+
+    /// Exports and durably persists decayed write/read EMAs for periodic Heartbeats (S05-17).
+    pub async fn durable_ema_snapshot(&self, now_ms: u64) -> Result<(u64, u64), IngressError> {
+        if self.accounting_persist_failed.load(Ordering::Acquire) {
+            return Err(IngressError::AccountingPersistenceUnavailable);
+        }
+        let permit = self
+            .accounting_persist_tx
+            .try_reserve()
+            .map_err(|_| IngressError::AccountingPersistenceUnavailable)?;
+
+        let (persisted, dec_write, dec_read) = {
+            let mut state = self.accounting_state.lock();
+            let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+
+            let (
+                dec_write,
+                dec_read,
+                write_ema_scaled,
+                last_write_ema_sec,
+                read_ema_scaled,
+                last_read_ema_sec,
+            ) = thermo.checkpoint_and_export_emas_at(now_ms / 1000);
+
+            state.checkpoint_seq = state.checkpoint_seq.saturating_add(1);
+            let checkpoint_seq = state.checkpoint_seq;
+            let reserved_epoch_seq = state
+                .target_reserved_seq
+                .max(state.persisted_reserved_seq)
+                .max(state.epoch_seq);
+
+            let persisted = crate::storage::PersistedIngressAccountingState {
+                checkpoint_seq,
+                current_day: state.current_day,
+                last_epoch_seq: state.epoch_seq,
+                reserved_epoch_seq,
+                last_timestamp_ms: state.last_timestamp_ms,
+                cumulative_micro_byte_years: state.cumulative_micro_byte_years,
+                prev_day_final_bytes: state.prev_day_final_bytes,
+                write_ema_scaled,
+                last_write_ema_sec,
+                read_ema_scaled,
+                last_read_ema_sec,
+            };
+            (persisted, dec_write, dec_read)
+        };
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        permit.send((persisted.clone(), ack_tx));
+
+        match ack_rx.await {
+            Ok(Ok(())) => {
+                let mut st = self.accounting_state.lock();
+                if persisted.checkpoint_seq >= st.persisted_checkpoint_seq {
+                    st.persisted_checkpoint_seq = persisted.checkpoint_seq;
+                    st.persisted_write_ema_scaled = persisted.write_ema_scaled;
+                    st.persisted_last_write_ema_sec = persisted.last_write_ema_sec;
+                    st.persisted_read_ema_scaled = persisted.read_ema_scaled;
+                    st.persisted_last_read_ema_sec = persisted.last_read_ema_sec;
+                }
+                Ok((dec_write, dec_read))
+            }
+            Ok(Err(e)) => {
+                self.accounting_persist_failed.store(true, Ordering::Release);
+                Err(e)
+            }
+            Err(_) => {
+                self.accounting_persist_failed.store(true, Ordering::Release);
+                Err(IngressError::AccountingPersistenceUnavailable)
+            }
+        }
+    }
+
+    /// Exports decayed write and read EMAs for read-only status queries with 100% read-service isolation (S05-17).
+    ///
+    /// Never touches disk or the persistence queue. Decays durably persisted write EMA to `now_ms / 1000`
+    /// to guarantee that signed status responses never advertise an unpersisted write EMA that could conflict
+    /// with a post-restart heartbeat.
+    pub fn status_query_emas_at(&self, now_ms: u64) -> (u64, u64) {
+        let now_sec = now_ms / 1000;
+        let (persisted_scaled, persisted_sec) = {
+            let st = self.accounting_state.lock();
+            (st.persisted_write_ema_scaled, st.persisted_last_write_ema_sec)
+        };
+        let declared_write_ema = match persisted_sec {
+            Some(last_sec) => {
+                let delta_secs = now_sec.saturating_sub(last_sec);
+                let decayed = humoco_sim_core::quota::decay_scaled_ema(persisted_scaled, delta_secs);
+                humoco_sim_core::quota::scaled_to_whole_units(decayed)
+            }
+            None => 0,
+        };
+        let declared_read_ema = self
+            .thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .read_ema_credits_at(now_sec);
+        (declared_write_ema, declared_read_ema)
     }
 
     /// Returns the tier write counters: (vip, f2f, free).

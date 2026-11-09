@@ -5112,5 +5112,51 @@ async fn test_s05_15_genuine_inconsistent_counter_control_rejected() {
     server_transport.close();
 }
 
+// ===========================================================================
+// S05-16: Required POSIX 0600 token-file protection error propagation
+// ===========================================================================
+
+#[test]
+fn test_s05_16_token_file_permission_failure_propagates() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().unwrap();
+        let token_path = temp.path().join("admin.token");
+        std::fs::write(&token_path, "hmc_adm_existing_secret_key\n").expect("write token");
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644))
+            .expect("set 0644");
+
+        // When permission enforcement fails (simulating EPERM / PermissionDenied on chmod),
+        // load_or_create must return Err and must NOT return a usable manager.
+        let _guard = AdminTokenManager::fail_permission_enforcement_for_test();
+        let result = AdminTokenManager::load_or_create(temp.path(), false);
+        drop(_guard);
+
+        let err = result.expect_err(
+            "load_or_create must fail when required permission enforcement fails",
+        );
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        // Required protection could not be established; file remains 0644
+        let meta = std::fs::metadata(&token_path).expect("metadata");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+
+        // Also test newly created token failure propagation
+        let temp_new = tempdir().unwrap();
+        let _guard_new = AdminTokenManager::fail_permission_enforcement_for_test();
+        let result_new = AdminTokenManager::load_or_create(temp_new.path(), false);
+        drop(_guard_new);
+
+        let err_new = result_new.expect_err(
+            "load_or_create must fail when new token permission enforcement fails",
+        );
+        assert_eq!(err_new.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+}
+
+
 
 

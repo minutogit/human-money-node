@@ -7,6 +7,41 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::cell::Cell;
+
+#[cfg(unix)]
+thread_local! {
+    static INJECT_PERMISSION_ERROR_FOR_TEST: Cell<bool> = const { Cell::new(false) };
+}
+
+/// RAII guard that resets the test permission-enforcement failure injection on drop.
+#[derive(Debug)]
+pub struct PermissionFaultGuard {
+    _private: (),
+}
+
+impl Drop for PermissionFaultGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        INJECT_PERMISSION_ERROR_FOR_TEST.with(|cell| cell.set(false));
+    }
+}
+
+#[cfg(unix)]
+fn enforce_file_permissions_0600(path: &Path) -> Result<(), std::io::Error> {
+    INJECT_PERMISSION_ERROR_FOR_TEST.with(|cell| {
+        if cell.get() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected permission failure for test",
+            ));
+        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    })
+}
+
 /// Maximum failed login attempts allowed per IP within the rate-limit window.
 pub const MAX_AUTH_FAILURES_PER_WINDOW: usize = 5;
 
@@ -45,9 +80,7 @@ impl AdminTokenManager {
         let token = if token_path.exists() {
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+                enforce_file_permissions_0600(&token_path)?;
             }
 
             let content = std::fs::read_to_string(&token_path)?;
@@ -72,7 +105,6 @@ impl AdminTokenManager {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
-                use std::os::unix::fs::PermissionsExt;
 
                 let mut file = OpenOptions::new()
                     .write(true)
@@ -85,8 +117,7 @@ impl AdminTokenManager {
                 file.flush()?;
 
                 // Ensure permissions are strictly 0600
-                let _ =
-                    std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+                enforce_file_permissions_0600(&token_path)?;
             }
 
             #[cfg(not(unix))]
@@ -103,6 +134,21 @@ impl AdminTokenManager {
             auth_disabled,
             failed_attempts: Arc::new(Mutex::new(AuthFailureTracker::default())),
         })
+    }
+
+    /// Injects a deterministic `PermissionDenied` error during file permission enforcement
+    /// on the calling thread for the lifetime of the returned guard (S05-16).
+    pub fn fail_permission_enforcement_for_test() -> PermissionFaultGuard {
+        Self::set_permission_error_injection_for_test(true);
+        PermissionFaultGuard { _private: () }
+    }
+
+    /// Sets or clears test permission-enforcement failure injection on the calling thread (S05-16).
+    pub fn set_permission_error_injection_for_test(enabled: bool) {
+        #[cfg(unix)]
+        INJECT_PERMISSION_ERROR_FOR_TEST.with(|cell| cell.set(enabled));
+        #[cfg(not(unix))]
+        let _ = enabled;
     }
 
     /// Creates an in-memory `AdminTokenManager` with an explicit token (useful for testing).
@@ -489,6 +535,47 @@ mod tests {
         let meta = std::fs::metadata(&token_path).expect("metadata");
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_s05_16_load_existing_token_fails_when_permission_enforcement_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let token_path = dir.path().join("admin.token");
+        std::fs::write(&token_path, "hmc_adm_validtoken123\n").expect("write token");
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644))
+            .expect("set 0644");
+
+        let _guard = AdminTokenManager::fail_permission_enforcement_for_test();
+        let res = AdminTokenManager::load_or_create(dir.path(), false);
+        drop(_guard);
+
+        let err = res.expect_err(
+            "AdminTokenManager::load_or_create must return Err if permission enforcement fails",
+        );
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        // Required file protection was not established; verify mode remains 0644
+        let meta = std::fs::metadata(&token_path).expect("metadata");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_s05_16_create_new_token_fails_when_permission_enforcement_denied() {
+        let dir = tempdir().expect("tempdir");
+
+        let _guard = AdminTokenManager::fail_permission_enforcement_for_test();
+        let res = AdminTokenManager::load_or_create(dir.path(), false);
+        drop(_guard);
+
+        let err = res.expect_err(
+            "AdminTokenManager::load_or_create must return Err if permission enforcement fails on creation",
+        );
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]

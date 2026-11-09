@@ -4101,6 +4101,14 @@ impl PeerManager {
         }
         None
     }
+
+    /// Test helper to acquire an exclusive write lock on peers, pausing any concurrent connection lookups.
+    #[doc(hidden)]
+    pub async fn acquire_peers_write_lock_for_test(
+        &self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<SocketAddr, PeerInfo>> {
+        self.peers.write().await
+    }
 }
 
 #[cfg(test)]

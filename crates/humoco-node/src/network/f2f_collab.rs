@@ -254,6 +254,12 @@ impl F2fInboxStore {
         self.messages.get(friend_pk).cloned().unwrap_or_default()
     }
 
+    pub fn get_message(&self, friend_pk: &[u8; 32], msg_id: u64) -> Option<F2fStoredMessage> {
+        self.messages
+            .get(friend_pk)
+            .and_then(|list| list.iter().find(|m| m.msg_id == msg_id).cloned())
+    }
+
     pub fn list_all_messages(&self) -> HashMap<[u8; 32], Vec<F2fStoredMessage>> {
         self.messages.clone()
     }

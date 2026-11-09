@@ -902,6 +902,19 @@ impl PendingApprovalsState {
         }
     }
 
+    fn remove_if_matching(
+        &mut self,
+        key: &[u8; 32],
+        rx: &ApprovalCompletion,
+    ) -> Option<PendingApprovalEntry> {
+        if let Some(entry) = self.entries.get(key) {
+            if entry.receiver.same_channel(rx) {
+                return self.remove(key);
+            }
+        }
+        None
+    }
+
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -925,7 +938,7 @@ impl Drop for ApprovalWaiterGuard {
     fn drop(&mut self) {
         if self.rx.borrow().is_some() || self.rx.has_changed().is_err() {
             let mut pending = self.pending.lock();
-            pending.remove(&self.key);
+            pending.remove_if_matching(&self.key, &self.rx);
         }
     }
 }
@@ -1182,6 +1195,13 @@ impl DualTierEngine {
         self.internal_admission.available_permits()
     }
 
+    /// Test-only hook to inspect available waiter permits for an in-flight key.
+    #[doc(hidden)]
+    pub fn pending_approval_waiters_available_for_test(&self, key: &[u8; 32]) -> Option<usize> {
+        let pending = self.pending_approvals.lock();
+        pending.entries.get(key).map(|e| e.waiters.available_permits())
+    }
+
     /// Test-only gate to deterministically pause/resume the background persistence flush loop.
     #[doc(hidden)]
     pub fn set_worker_paused_for_test(&self, paused: bool) {
@@ -1290,6 +1310,7 @@ impl DualTierEngine {
                     },
                 );
                 let pending_bg = Arc::clone(&self.pending_approvals);
+                let rx_match = receiver.clone();
                 let mut rx_bg = receiver.clone();
                 tokio::spawn(async move {
                     while rx_bg.borrow().is_none() {
@@ -1298,7 +1319,7 @@ impl DualTierEngine {
                         }
                     }
                     let mut pending = pending_bg.lock();
-                    pending.remove(&key);
+                    pending.remove_if_matching(&key, &rx_match);
                 });
                 (receiver, waiter)
             }

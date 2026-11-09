@@ -969,6 +969,47 @@ impl NetworkThermometer {
     pub fn rolling_24h_read_average(&self) -> u64 {
         self.rolling_24h_read_average_at(self.last_read_ema_sec.unwrap_or(0))
     }
+
+    /// Returns the raw fixed-point write and read EMA state with their time anchors (S05-15).
+    pub fn raw_ema_state(&self) -> (u128, Option<u64>, u128, Option<u64>) {
+        (
+            self.write_ema_scaled,
+            self.last_write_ema_sec,
+            self.read_ema_scaled,
+            self.last_read_ema_sec,
+        )
+    }
+
+    /// Restores the fixed-point write and read EMA state with their time anchors (S05-15).
+    pub fn restore_ema_state(
+        &mut self,
+        write_ema_scaled: u128,
+        last_write_ema_sec: Option<u64>,
+        read_ema_scaled: u128,
+        last_read_ema_sec: Option<u64>,
+    ) {
+        self.write_ema_scaled = write_ema_scaled;
+        self.last_write_ema_sec = last_write_ema_sec;
+        self.read_ema_scaled = read_ema_scaled;
+        self.last_read_ema_sec = last_read_ema_sec;
+    }
+
+    /// Monotonically decays and advances EMA accumulators to `now_sec` and returns
+    /// both whole units (for declared envelopes) and fixed-point state (for durable persistence) (S05-15).
+    pub fn checkpoint_and_export_emas_at(
+        &mut self,
+        now_sec: u64,
+    ) -> (u64, u64, u128, Option<u64>, u128, Option<u64>) {
+        let (whole_write, whole_read) = self.checkpoint_emas_at(now_sec);
+        (
+            whole_write,
+            whole_read,
+            self.write_ema_scaled,
+            self.last_write_ema_sec,
+            self.read_ema_scaled,
+            self.last_read_ema_sec,
+        )
+    }
 }
 
 impl Default for NetworkThermometer {

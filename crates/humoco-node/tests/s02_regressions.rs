@@ -23,8 +23,9 @@ use humoco_node::{
     ingress::{PowEngine, TierController},
     network::{framing::LockWirePayload, NodeRequestHandler, PeerManager, QuicTransport},
     storage::{
-        db::install::ShardStage, db::TABLE_HMC_LOCKS, DualTierEngine, IngressOrigin, RedbStorage,
-        StorageError, TABLE_OWN_CHOICES, TABLE_OWN_CHOICE_COMMITMENTS,
+        db::install::ShardStage, db::TABLE_HMC_LOCKS, DualTierEngine, HmcRamIndex, IngressOrigin,
+        PersistenceServiceClass, RedbStorage, StorageError, TABLE_OWN_CHOICES,
+        TABLE_OWN_CHOICE_COMMITMENTS,
     },
 };
 use humoco_proto::causal::CausalOutputProof;
@@ -34,7 +35,14 @@ use humoco_sim_core::{
 };
 use sha2::{Digest, Sha256};
 use sha3::Sha3_256;
-use std::{error::Error, path::Path, sync::Arc, time::Duration};
+use std::{
+    error::Error,
+    future::Future,
+    path::Path,
+    sync::Arc,
+    task::{Context, Waker},
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
@@ -2765,7 +2773,21 @@ async fn test_s02_14_controlled_worker_pending_approvals_isolation() -> TestResu
                 .await
         }));
     }
-    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let key0 = *blake3::hash(&bincode::serialize(&(
+        "original-hmc",
+        &node_id,
+        &spend_tags[0],
+        &spend_entries[0].t_id,
+        0u8,
+    ))?)
+    .as_bytes();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while engine.pending_approval_waiters_available_for_test(&key0) != Some(0) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
 
     let res_overflow = engine
         .persist_original_approval(
@@ -2892,7 +2914,12 @@ async fn test_s02_14_controlled_worker_pending_approvals_isolation() -> TestResu
             )
             .await
     });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while engine.pending_approvals_count_for_test() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
     cancel_handle.abort(); // Cancel waiter task explicitly
     assert_eq!(engine.internal_pending_approvals_count_for_test(), 1);
     assert_eq!(engine.public_pending_approvals_count_for_test(), 1);
@@ -3057,7 +3084,7 @@ async fn test_s02_14_real_quic_pending_approval_isolation() -> TestResult {
     // In pre-fix code, target rejected this with "Approval capacity exhausted" and sent FLAG_NOT_READY immediately.
     // In fixed code, target enqueues the internal approval (using reserved internal capacity) and waits for worker.
     // Check that attestation is NOT released immediately while worker is paused:
-    let early = tokio::time::timeout(Duration::from_millis(50), async {
+    let early = tokio::time::timeout(Duration::from_millis(25), async {
         while !quic_task.is_finished() {
             tokio::task::yield_now().await;
         }
@@ -3217,5 +3244,645 @@ async fn test_pre_launch_cleanup_uniform_choice_ttl_no_native_bypass() -> TestRe
         !reopened.is_signing_history_healthy(),
         "Reopened storage must detect corrupt signing state uniformly without native: bypass"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_15_controlled_guard_cleanup_retained_replacement() -> TestResult {
+    for service_class in [
+        PersistenceServiceClass::Public,
+        PersistenceServiceClass::Internal,
+    ] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(format!("s02_15_guard_{:?}.redb", service_class));
+        let db = Arc::new(RedbStorage::open(&path)?);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(20);
+        let ram = Arc::new(tokio::sync::RwLock::new(HmcRamIndex::new()));
+        let engine = DualTierEngine::from_parts_with_limits(ram.clone(), db.clone(), tx, 20, 20);
+
+        let key_signer = SigningKey::from_bytes(&[33; 32]);
+        let now = 10_000u64;
+        let root_req = root_with_ttl(&key_signer, 1, now, 600_000)?;
+        let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+        let root_entry: L2LockEntry = (&root_req).into();
+        db.put_hmc_lock(&root_tag, &root_entry)?;
+        ram.write().await.insert_recovered(root_tag.clone(), root_entry.clone());
+
+        let spend_req = spend(&root_req, 2, &key_signer)?;
+        let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+        let spend_entry: L2LockEntry = (&spend_req).into();
+        ram.write().await.insert_recovered(spend_tag.clone(), spend_entry.clone());
+
+        let node = [7u8; 32];
+        let mut cx = Context::from_waker(Waker::noop());
+
+        // 1. Initiate operation A
+        let mut a = Box::pin(engine.persist_original_approval(
+            spend_tag.clone(),
+            spend_entry.clone(),
+            node,
+            b"approval_a".to_vec(),
+            0,
+            now,
+            service_class,
+        ));
+        assert!(a.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(engine.pending_approvals_count_for_test(), 1);
+        match service_class {
+            PersistenceServiceClass::Public => {
+                assert_eq!(engine.public_pending_approvals_count_for_test(), 1);
+            }
+            PersistenceServiceClass::Internal => {
+                assert_eq!(engine.internal_pending_approvals_count_for_test(), 1);
+            }
+        }
+        assert_eq!(rx.len(), 1);
+
+        // 2. Commit operation A durably via flush_batch, but leave future A unpolled
+        let op_a = rx.try_recv()?;
+        let outcome_a = DualTierEngine::flush_batch(&mut vec![op_a], &db);
+        assert!(!outcome_a.failed);
+        assert_eq!(outcome_a.ops_committed, 1);
+
+        // 3. Exact retry B arrives for the same key while A is unpolled
+        let mut b = Box::pin(engine.persist_original_approval(
+            spend_tag.clone(),
+            spend_entry.clone(),
+            node,
+            b"approval_b".to_vec(),
+            0,
+            now,
+            service_class,
+        ));
+        assert!(b.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(rx.len(), 1, "retry B must be queued");
+        assert_eq!(engine.pending_approvals_count_for_test(), 1);
+
+        // 4. Resume A to completion; dropping A drops ApprovalWaiterGuard
+        assert!(a.as_mut().poll(&mut cx).is_ready());
+        drop(a);
+
+        // 5. REQUIRE B to remain pending and counted!
+        assert_eq!(
+            engine.pending_approvals_count_for_test(),
+            1,
+            "stale waiter guard drop for A must NOT remove replacement B"
+        );
+        match service_class {
+            PersistenceServiceClass::Public => {
+                assert_eq!(engine.public_pending_approvals_count_for_test(), 1);
+            }
+            PersistenceServiceClass::Internal => {
+                assert_eq!(engine.internal_pending_approvals_count_for_test(), 1);
+            }
+        }
+
+        // 6. Retry C arrives: must join B as a coalesced waiter without queueing another operation!
+        let mut c = Box::pin(engine.persist_original_approval(
+            spend_tag.clone(),
+            spend_entry.clone(),
+            node,
+            b"approval_b".to_vec(),
+            0,
+            now,
+            service_class,
+        ));
+        assert!(c.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            rx.len(),
+            1,
+            "retry C must coalesce with in-flight B without creating a second queue entry"
+        );
+        assert_eq!(engine.pending_approvals_count_for_test(), 1);
+
+        // 7. Test waiter limit: B currently has 2 waiters (B creator + C).
+        // Max approval waiters is 32. We can add 30 more waiters using spawned tasks.
+        let mut excess_tasks = Vec::with_capacity(30);
+        for _ in 0..30 {
+            let eng_w = engine.clone();
+            let w_tag = spend_tag.clone();
+            let w_entry = spend_entry.clone();
+            excess_tasks.push(tokio::spawn(async move {
+                eng_w
+                    .persist_original_approval(
+                        w_tag,
+                        w_entry,
+                        node,
+                        b"approval_b".to_vec(),
+                        0,
+                        now,
+                        service_class,
+                    )
+                    .await
+            }));
+        }
+
+        // Wait until all 30 excess waiters have joined the pending entry (total 32 waiters)
+        let key_b = *blake3::hash(&bincode::serialize(&(
+            "original-hmc",
+            &node,
+            &spend_tag,
+            &spend_entry.t_id,
+            0u8,
+        ))?)
+        .as_bytes();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while engine.pending_approval_waiters_available_for_test(&key_b) != Some(0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+
+        // 33rd waiter must exceed MAX_APPROVAL_WAITERS (32) and fail immediately
+        let res_overflow = engine
+            .persist_original_approval(
+                spend_tag.clone(),
+                spend_entry.clone(),
+                node,
+                b"approval_b".to_vec(),
+                0,
+                now,
+                service_class,
+            )
+            .await;
+        assert!(
+            matches!(res_overflow, Err(StorageError::DurableCommitFailed(ref s)) if s.contains("Too many approval waiters")),
+            "33rd waiter must be refused when waiter limit is reached, got: {res_overflow:?}"
+        );
+        assert_eq!(rx.len(), 1);
+
+        // 8. Commit B durably via flush_batch
+        let op_b = rx.try_recv()?;
+        let outcome_b = DualTierEngine::flush_batch(&mut vec![op_b], &db);
+        assert!(!outcome_b.failed);
+        assert_eq!(outcome_b.ops_committed, 1);
+
+        // 9. All waiters (B, C, extras) must now complete with the retained choice
+        match b.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(Ok(bytes)) => assert_eq!(bytes, b"approval_a"),
+            other => panic!("expected Ready(Ok), got {other:?}"),
+        }
+        match c.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(Ok(bytes)) => assert_eq!(bytes, b"approval_a"),
+            other => panic!("expected Ready(Ok), got {other:?}"),
+        }
+        for (idx, task) in excess_tasks.into_iter().enumerate() {
+            let res = task.await?;
+            assert!(res.is_ok(), "waiter {idx} failed: {res:?}");
+            assert_eq!(res.unwrap(), b"approval_a");
+        }
+        drop(b);
+        drop(c);
+
+        // 10. Clean permit and pending counter verification
+        assert_eq!(engine.pending_approvals_count_for_test(), 0);
+        assert_eq!(engine.public_pending_approvals_count_for_test(), 0);
+        assert_eq!(engine.internal_pending_approvals_count_for_test(), 0);
+        assert_eq!(engine.public_persistence_permits_available_for_test(), 20);
+        assert_eq!(engine.internal_persistence_permits_available_for_test(), 20);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_15_controlled_background_cleanup_retained_replacement() -> TestResult {
+    for service_class in [
+        PersistenceServiceClass::Public,
+        PersistenceServiceClass::Internal,
+    ] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(format!("s02_15_bg_{:?}.redb", service_class));
+        let db = Arc::new(RedbStorage::open(&path)?);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(20);
+        let ram = Arc::new(tokio::sync::RwLock::new(HmcRamIndex::new()));
+        let engine = DualTierEngine::from_parts_with_limits(ram.clone(), db.clone(), tx, 20, 20);
+
+        let key_signer = SigningKey::from_bytes(&[33; 32]);
+        let now = 10_000u64;
+        let root_req = root_with_ttl(&key_signer, 1, now, 600_000)?;
+        let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+        let root_entry: L2LockEntry = (&root_req).into();
+        db.put_hmc_lock(&root_tag, &root_entry)?;
+        ram.write().await.insert_recovered(root_tag.clone(), root_entry.clone());
+
+        let spend_req = spend(&root_req, 2, &key_signer)?;
+        let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+        let spend_entry: L2LockEntry = (&spend_req).into();
+        ram.write().await.insert_recovered(spend_tag.clone(), spend_entry.clone());
+
+        let node = [8u8; 32];
+        let mut cx = Context::from_waker(Waker::noop());
+
+        // 1. Enqueue operation A
+        let mut a = Box::pin(engine.persist_original_approval(
+            spend_tag.clone(),
+            spend_entry.clone(),
+            node,
+            b"approval_a".to_vec(),
+            0,
+            now,
+            service_class,
+        ));
+        assert!(a.as_mut().poll(&mut cx).is_pending());
+
+        // 2. Commit A durably via flush_batch, keep A's future completely unpolled
+        let op_a = rx.try_recv()?;
+        let outcome_a = DualTierEngine::flush_batch(&mut vec![op_a], &db);
+        assert!(!outcome_a.failed);
+
+        // 3. Enqueue replacement B
+        let mut b = Box::pin(engine.persist_original_approval(
+            spend_tag.clone(),
+            spend_entry.clone(),
+            node,
+            b"approval_b".to_vec(),
+            0,
+            now,
+            service_class,
+        ));
+        assert!(b.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(engine.pending_approvals_count_for_test(), 1);
+        assert_eq!(rx.len(), 1);
+
+        // 4. Yield / wait briefly so A's background completion task runs
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // 5. REQUIRE B to remain pending and counted!
+        assert_eq!(
+            engine.pending_approvals_count_for_test(),
+            1,
+            "stale background cleanup task for A must NOT remove replacement B"
+        );
+        match service_class {
+            PersistenceServiceClass::Public => {
+                assert_eq!(engine.public_pending_approvals_count_for_test(), 1);
+            }
+            PersistenceServiceClass::Internal => {
+                assert_eq!(engine.internal_pending_approvals_count_for_test(), 1);
+            }
+        }
+
+        // 6. Enqueue C: must join B without enqueuing a new operation
+        let mut c = Box::pin(engine.persist_original_approval(
+            spend_tag.clone(),
+            spend_entry.clone(),
+            node,
+            b"approval_b".to_vec(),
+            0,
+            now,
+            service_class,
+        ));
+        assert!(c.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(rx.len(), 1, "C must coalesce with B");
+
+        // 7. Commit B and complete
+        let op_b = rx.try_recv()?;
+        assert!(!DualTierEngine::flush_batch(&mut vec![op_b], &db).failed);
+        assert!(b.as_mut().poll(&mut cx).is_ready());
+        assert!(c.as_mut().poll(&mut cx).is_ready());
+        drop(b);
+        drop(c);
+        drop(a);
+
+        // 8. Verify clean state
+        assert_eq!(engine.pending_approvals_count_for_test(), 0);
+        assert_eq!(engine.public_pending_approvals_count_for_test(), 0);
+        assert_eq!(engine.internal_pending_approvals_count_for_test(), 0);
+        assert_eq!(engine.public_persistence_permits_available_for_test(), 20);
+        assert_eq!(engine.internal_persistence_permits_available_for_test(), 20);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_15_cancellation_and_closed_channel_retained_replacement() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("s02_15_cancel.redb");
+    let db = Arc::new(RedbStorage::open(&path)?);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(20);
+    let ram = Arc::new(tokio::sync::RwLock::new(HmcRamIndex::new()));
+    let engine = DualTierEngine::from_parts_with_limits(ram.clone(), db.clone(), tx, 20, 20);
+
+    let key_signer = SigningKey::from_bytes(&[33; 32]);
+    let now = 10_000u64;
+    let root_req = root_with_ttl(&key_signer, 1, now, 600_000)?;
+    let root_tag = bs58::encode(root_req.transaction_hash).into_string();
+    let root_entry: L2LockEntry = (&root_req).into();
+    db.put_hmc_lock(&root_tag, &root_entry)?;
+    ram.write().await.insert_recovered(root_tag.clone(), root_entry.clone());
+
+    let spend_req = spend(&root_req, 2, &key_signer)?;
+    let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+    let spend_entry: L2LockEntry = (&spend_req).into();
+    ram.write().await.insert_recovered(spend_tag.clone(), spend_entry.clone());
+
+    let node = [9u8; 32];
+    let mut cx = Context::from_waker(Waker::noop());
+
+    // Case 1: Cancellation while in flight
+    let eng_cancel = engine.clone();
+    let s_tag = spend_tag.clone();
+    let s_entry = spend_entry.clone();
+    let cancel_task = tokio::spawn(async move {
+        eng_cancel
+            .persist_original_approval(
+                s_tag,
+                s_entry,
+                node,
+                b"app_cancel".to_vec(),
+                0,
+                now,
+                PersistenceServiceClass::Public,
+            )
+            .await
+    });
+    // Wait until task is pending in engine
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while engine.pending_approvals_count_for_test() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(engine.pending_approvals_count_for_test(), 1);
+    assert_eq!(rx.len(), 1);
+
+    // Abort the task (cancellation)
+    cancel_task.abort();
+    let _ = cancel_task.await;
+
+    // Operation remains pending until flushed or channel drops
+    assert_eq!(engine.pending_approvals_count_for_test(), 1);
+
+    // Commit the cancelled op
+    let op_c = rx.try_recv()?;
+    assert!(!DualTierEngine::flush_batch(&mut vec![op_c], &db).failed);
+
+    // Yield to let background cleanup clear it
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(engine.pending_approvals_count_for_test(), 0);
+
+    // Case 2: Failed/closed completion channel
+    // Start op A
+    let mut a = Box::pin(engine.persist_original_approval(
+        spend_tag.clone(),
+        spend_entry.clone(),
+        node,
+        b"app_failed_channel".to_vec(),
+        0,
+        now,
+        PersistenceServiceClass::Internal,
+    ));
+    assert!(a.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(rx.len(), 1);
+
+    // Drop the op (dropping the watch::Sender without sending a value -> channel errors)
+    let op_dropped = rx.try_recv()?;
+    drop(op_dropped);
+
+    // Enqueue replacement B for the same key
+    let mut b = Box::pin(engine.persist_original_approval(
+        spend_tag.clone(),
+        spend_entry.clone(),
+        node,
+        b"app_replacement_b".to_vec(),
+        0,
+        now,
+        PersistenceServiceClass::Internal,
+    ));
+    assert!(b.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(rx.len(), 1);
+
+    // Resume A: it sees channel error and exits
+    let a_res = a.as_mut().poll(&mut cx);
+    assert!(matches!(a_res, std::task::Poll::Ready(Err(StorageError::DurableCommitFailed(ref s))) if s.contains("Persistence worker stopped")));
+    drop(a);
+
+    // Yield for A's background task
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    // Replacement B must remain pending and counted!
+    assert_eq!(
+        engine.pending_approvals_count_for_test(),
+        1,
+        "failed channel cleanup of A must NOT remove replacement B"
+    );
+    assert_eq!(engine.internal_pending_approvals_count_for_test(), 1);
+
+    // Join C to B
+    let mut c = Box::pin(engine.persist_original_approval(
+        spend_tag.clone(),
+        spend_entry.clone(),
+        node,
+        b"app_replacement_b".to_vec(),
+        0,
+        now,
+        PersistenceServiceClass::Internal,
+    ));
+    assert!(c.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(rx.len(), 1);
+
+    // Commit B
+    let op_b = rx.try_recv()?;
+    assert!(!DualTierEngine::flush_batch(&mut vec![op_b], &db).failed);
+    assert!(b.as_mut().poll(&mut cx).is_ready());
+    assert!(c.as_mut().poll(&mut cx).is_ready());
+    drop(b);
+    drop(c);
+
+    // Clean permits
+    assert_eq!(engine.pending_approvals_count_for_test(), 0);
+    assert_eq!(engine.public_persistence_permits_available_for_test(), 20);
+    assert_eq!(engine.internal_persistence_permits_available_for_test(), 20);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s02_15_real_quic_retry_completion_coalescing_and_backpressure() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source_path = dir.path().join("s02_15_quic_source.redb");
+    let target_path = dir.path().join("s02_15_quic_target.redb");
+    let source_id = NodeIdentity::generate();
+    let target_id = NodeIdentity::generate();
+    let wallet_node = NodeIdentity::generate();
+
+    let source = WireNode::start(&source_path, source_id).await?;
+    let target = WireNode::start(&target_path, target_id).await?;
+
+    let now = target.manager.clock().net_time_ms();
+    let root_ttl = 120_000u64;
+    let root_req = root_with_ttl(wallet_node.signing_key(), 42, now, root_ttl)?;
+    let shard_id = shard(&root_req);
+
+    target
+        .manager
+        .register_f2f_friend(*wallet_node.node_pubkey(), None)
+        .await;
+    anchor(&target.engine, &root_req).await?;
+    target.ready.mark_shard_ready(shard_id);
+
+    let connection = connect_friends(&source, &target).await?;
+
+    // 1. Pause target persistence worker approvals (while letting lock persistence proceed)
+    target.engine.set_worker_approvals_paused_for_test(true);
+
+    // 2. Prepare spend request and insert into target RAM
+    let spend_req = spend_indexed(&root_req, 100, wallet_node.signing_key())?;
+    let spend_tag = spend_req.ds_tag.clone().ok_or("missing spend tag")?;
+    let spend_entry: L2LockEntry = (&spend_req).into();
+    target
+        .engine
+        .hmc_ram
+        .write()
+        .await
+        .insert_recovered(spend_tag.clone(), spend_entry.clone());
+
+    // 3. Send spend 1 via real QUIC
+    let source_net = source.network.clone();
+    let conn_wire = (*connection).clone();
+    let sender_pk = *source.identity.node_pubkey();
+    let sk = source.identity.signing_key().clone();
+    let req_clone = spend_req.clone();
+    let task1 = tokio::spawn(async move {
+        send_spend_wire(source_net, conn_wire, req_clone, sender_pk, sk, now, 1).await
+    });
+
+    // Wait until target engine registers 1 pending approval
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while target.engine.pending_approvals_count_for_test() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.pending_approvals_count_for_test(), 1);
+
+    // Verify durable-before-signature invariant: task1 must NOT complete while worker is paused!
+    let early = tokio::time::timeout(Duration::from_millis(25), async {
+        while !task1.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(early.is_err(), "QUIC request must not release signature before durable commit");
+
+    // 4. Send exact duplicate spend 2 via real QUIC (retry while first is in flight)
+    let source_net2 = source.network.clone();
+    let conn_wire2 = (*connection).clone();
+    let sender_pk2 = *source.identity.node_pubkey();
+    let sk2 = source.identity.signing_key().clone();
+    let req_clone2 = spend_req.clone();
+    let task2 = tokio::spawn(async move {
+        send_spend_wire(source_net2, conn_wire2, req_clone2, sender_pk2, sk2, now, 2).await
+    });
+
+    // Wait briefly and verify that target engine still has exactly 1 pending approval (coalesced!)
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        target.engine.pending_approvals_count_for_test(),
+        1,
+        "concurrent QUIC retries must coalesce into 1 pending approval"
+    );
+
+    // 5. Resume target worker: both requests commit and receive identical signed attestations
+    target.engine.set_worker_approvals_paused_for_test(false);
+
+    let (header1, reply1) = task1.await??;
+    let (header2, reply2) = task2.await??;
+
+    assert_eq!(header1.flags & humoco_sim_core::wire::FLAG_NOT_READY, 0);
+    assert_eq!(header2.flags & humoco_sim_core::wire::FLAG_NOT_READY, 0);
+
+    let att1 = humoco_node::api::dto::AttestationDto::from_wire_bytes(&reply1)
+        .expect("must return valid attestation 1");
+    let att2 = humoco_node::api::dto::AttestationDto::from_wire_bytes(&reply2)
+        .expect("must return valid attestation 2");
+
+    assert_eq!(att1.lock_id, att2.lock_id);
+    assert_eq!(att1.signature, att2.signature);
+
+    // Wait until pending approvals clear
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while target.engine.pending_approvals_count_for_test() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.pending_approvals_count_for_test(), 0);
+
+    // 6. Neutral backpressure under saturation
+    target.engine.set_worker_approvals_paused_for_test(true);
+    let target_pubkey = *target.identity.node_pubkey();
+    let max_internal = 64; // MAX_INTERNAL_PENDING_APPROVALS
+    let mut fill_tasks = Vec::with_capacity(max_internal);
+    for i in 0..max_internal {
+        let req = spend_indexed(&root_req, 600 + i as u32, wallet_node.signing_key())?;
+        let tag = req.ds_tag.clone().ok_or("missing spend tag")?;
+        let entry: L2LockEntry = (&req).into();
+        target
+            .engine
+            .hmc_ram
+            .write()
+            .await
+            .insert_recovered(tag.clone(), entry.clone());
+        let eng = target.engine.clone();
+        fill_tasks.push(tokio::spawn(async move {
+            eng.persist_original_approval(
+                tag,
+                entry,
+                target_pubkey,
+                b"int_fill".to_vec(),
+                0,
+                now,
+                PersistenceServiceClass::Internal,
+            )
+            .await
+        }));
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while target.engine.internal_pending_approvals_count_for_test() < max_internal {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.internal_pending_approvals_count_for_test(), max_internal);
+
+    // 65th Internal QUIC request when Internal capacity is full
+    let excess_req = spend_indexed(&root_req, 900, wallet_node.signing_key())?;
+    let (excess_header, excess_reply) = send_spend(&source, &connection, &excess_req, 10, false).await?;
+    assert_ne!(
+        excess_header.flags & humoco_sim_core::wire::FLAG_NOT_READY,
+        0,
+        "Capacity saturation must return FLAG_NOT_READY"
+    );
+    assert!(excess_reply.is_empty());
+    assert!(
+        !target.manager.is_banned(source.identity.node_pubkey()).await,
+        "Peer must not be banned on neutral capacity backpressure"
+    );
+
+    // Resume approvals and drain
+    target.engine.set_worker_approvals_paused_for_test(false);
+    for task in fill_tasks {
+        let res = task.await?;
+        assert!(res.is_ok());
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while target.engine.pending_approvals_count_for_test() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(target.engine.pending_approvals_count_for_test(), 0);
+
+    drop(connection);
+    source.stop().await?;
+    target.stop().await?;
     Ok(())
 }

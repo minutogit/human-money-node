@@ -3364,6 +3364,15 @@ impl QuicTransport {
             .to_bytes()
             .map_err(|e| format!("Invalid F2F operator message: {}", e))?;
 
+        // S04-19: Validate and publish pending/history state BEFORE connection lookup, await, or transmission.
+        // Keeps pending state intact if connection lookup, dial, or transmission fails.
+        let stored_init = self
+            .peer_manager
+            .f2f_collab()
+            .lock()
+            .inbox_mut()
+            .queue_outbound(friend_pubkey, payload, false);
+
         let friend_addr = self.peer_manager.get_f2f_friend_addr(&friend_pubkey).await;
         let conn_opt = match friend_addr {
             Some(addr) => self.peer_manager.get_connection(&addr).await,
@@ -3383,12 +3392,16 @@ impl QuicTransport {
                 .await;
         }
 
+        // Read back the current stored message state so if an authenticated ACK already arrived
+        // during transmission, delivered=true is accurately returned, while preserving pending
+        // state on transmission/lookup failure without requeueing a stale undelivered clone.
         let stored = self
             .peer_manager
             .f2f_collab()
             .lock()
-            .inbox_mut()
-            .queue_outbound(friend_pubkey, payload, false);
+            .inbox()
+            .get_message(&friend_pubkey, msg_id)
+            .unwrap_or(stored_init);
 
         Ok(stored)
     }

@@ -236,14 +236,16 @@ impl TierController {
                 let mut waiters: Vec<tokio::sync::oneshot::Sender<Result<(), IngressError>>> =
                     vec![first_tx];
                 while let Ok((next_state, next_tx)) = accounting_persist_rx.try_recv() {
-                    if next_state.current_day > highest.current_day
+                    let is_next_higher = next_state.current_day > highest.current_day
                         || (next_state.current_day == highest.current_day
-                            && (next_state.reserved_epoch_seq > highest.reserved_epoch_seq
-                                || (next_state.reserved_epoch_seq == highest.reserved_epoch_seq
-                                    && (next_state.cumulative_micro_byte_years > highest.cumulative_micro_byte_years
-                                        || (next_state.cumulative_micro_byte_years == highest.cumulative_micro_byte_years
-                                            && next_state.last_timestamp_ms >= highest.last_timestamp_ms)))))
-                    {
+                            && (next_state.last_epoch_seq > highest.last_epoch_seq
+                                || (next_state.last_epoch_seq == highest.last_epoch_seq
+                                    && (next_state.reserved_epoch_seq > highest.reserved_epoch_seq
+                                        || (next_state.reserved_epoch_seq == highest.reserved_epoch_seq
+                                            && (next_state.cumulative_micro_byte_years > highest.cumulative_micro_byte_years
+                                                || (next_state.cumulative_micro_byte_years == highest.cumulative_micro_byte_years
+                                                    && next_state.last_timestamp_ms >= highest.last_timestamp_ms)))))));
+                    if is_next_higher {
                         highest = next_state;
                     }
                     waiters.push(next_tx);
@@ -285,6 +287,7 @@ impl TierController {
         });
 
         let mut initial_accounting = IngressAccountingState::default();
+        let mut initial_thermometer = NetworkThermometer::new();
         match storage.load_ingress_accounting_state() {
             Ok(Some(st)) => {
                 let start_day = st.current_day;
@@ -293,13 +296,25 @@ impl TierController {
                 initial_accounting.cumulative_micro_byte_years = st.cumulative_micro_byte_years;
                 initial_accounting.prev_day_final_bytes = st.prev_day_final_bytes;
 
+                initial_thermometer.restore_ema_state(
+                    st.write_ema_scaled,
+                    st.last_write_ema_sec,
+                    st.read_ema_scaled,
+                    st.last_read_ema_sec,
+                );
+
                 let pre_reserved = start_seq.saturating_add(INGRESS_SEQ_LEASE_BLOCK);
                 let pre_state = crate::storage::PersistedIngressAccountingState {
                     current_day: start_day,
+                    last_epoch_seq: st.last_epoch_seq,
                     reserved_epoch_seq: pre_reserved,
                     last_timestamp_ms: initial_accounting.last_timestamp_ms,
                     cumulative_micro_byte_years: initial_accounting.cumulative_micro_byte_years,
                     prev_day_final_bytes: initial_accounting.prev_day_final_bytes,
+                    write_ema_scaled: st.write_ema_scaled,
+                    last_write_ema_sec: st.last_write_ema_sec,
+                    read_ema_scaled: st.read_ema_scaled,
+                    last_read_ema_sec: st.last_read_ema_sec,
                 };
                 match storage.store_ingress_accounting_state(&pre_state) {
                     Ok(()) => {
@@ -318,10 +333,15 @@ impl TierController {
                 let boot_day = pow_engine.now_ms() / (86_400 * 1000);
                 let pre_state = crate::storage::PersistedIngressAccountingState {
                     current_day: boot_day,
+                    last_epoch_seq: 0,
                     reserved_epoch_seq: INGRESS_SEQ_LEASE_BLOCK,
                     last_timestamp_ms: 0,
                     cumulative_micro_byte_years: 0,
                     prev_day_final_bytes: 0,
+                    write_ema_scaled: 0,
+                    last_write_ema_sec: None,
+                    read_ema_scaled: 0,
+                    last_read_ema_sec: None,
                 };
                 match storage.store_ingress_accounting_state(&pre_state) {
                     Ok(()) => {
@@ -367,7 +387,7 @@ impl TierController {
             vip_credentials: Arc::new(RwLock::new(initial_vip_credentials)),
             f2f_tokens: Arc::new(RwLock::new(HashSet::new())),
             f2f_clients: Arc::new(RwLock::new(HashMap::new())),
-            thermometer: Arc::new(RwLock::new(NetworkThermometer::new())),
+            thermometer: Arc::new(RwLock::new(initial_thermometer)),
             vip_quota_cache: Arc::new(PlRwLock::new(initial_cache)),
             vip_writes_today: Arc::new(AtomicU64::new(0)),
             f2f_writes_today: Arc::new(AtomicU64::new(0)),
@@ -482,8 +502,12 @@ impl TierController {
             cum,
             prev,
             target_reserved_seq,
+            declared_write_ema,
+            declared_read_ema,
         ) = {
             let mut state = self.accounting_state.lock();
+            let mut thermo = self.thermometer.write().unwrap_or_else(|e| e.into_inner());
+
             if state.current_day == 0 {
                 state.current_day = incoming_day;
             } else if incoming_day > state.current_day {
@@ -520,12 +544,27 @@ impl TierController {
             } else {
                 seq.saturating_add(INGRESS_SEQ_LEASE_BLOCK.saturating_sub(1))
             };
+
+            let (
+                dec_write,
+                dec_read,
+                write_ema_scaled,
+                last_write_ema_sec,
+                read_ema_scaled,
+                last_read_ema_sec,
+            ) = thermo.checkpoint_and_export_emas_at(effective_ts_ms / 1000);
+
             let persisted = crate::storage::PersistedIngressAccountingState {
                 current_day: effective_day,
+                last_epoch_seq: seq,
                 reserved_epoch_seq: target_reserved_seq,
                 last_timestamp_ms: effective_ts_ms,
                 cumulative_micro_byte_years: cum,
                 prev_day_final_bytes: prev,
+                write_ema_scaled,
+                last_write_ema_sec,
+                read_ema_scaled,
+                last_read_ema_sec,
             };
             (
                 persisted,
@@ -535,6 +574,8 @@ impl TierController {
                 cum,
                 prev,
                 target_reserved_seq,
+                dec_write,
+                dec_read,
             )
         };
 
@@ -557,12 +598,6 @@ impl TierController {
             }
         }
 
-        let (declared_write_ema, declared_read_ema) = self
-            .thermometer
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .checkpoint_emas_at(effective_ts_ms / 1000);
-
         Ok(DeclaredIngressAllocation {
             epoch_day: effective_day as u32,
             epoch_seq: seq,
@@ -579,12 +614,20 @@ impl TierController {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         let persisted = {
             let state = self.accounting_state.lock();
+            let thermo = self.thermometer.read().unwrap_or_else(|e| e.into_inner());
+            let (write_ema_scaled, last_write_ema_sec, read_ema_scaled, last_read_ema_sec) =
+                thermo.raw_ema_state();
             crate::storage::PersistedIngressAccountingState {
                 current_day: state.current_day,
+                last_epoch_seq: state.epoch_seq,
                 reserved_epoch_seq: state.persisted_reserved_seq,
                 last_timestamp_ms: state.last_timestamp_ms,
                 cumulative_micro_byte_years: state.cumulative_micro_byte_years,
                 prev_day_final_bytes: state.prev_day_final_bytes,
+                write_ema_scaled,
+                last_write_ema_sec,
+                read_ema_scaled,
+                last_read_ema_sec,
             }
         };
         if let Ok(permit) = self.accounting_persist_tx.reserve().await {

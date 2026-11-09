@@ -140,14 +140,20 @@ pub const TABLE_VIP_CREDENTIALS: TableDefinition<&[u8; 32], &[u8; 32]> =
 /// Persisted VIP credential record mapping `(token_hash, account_tag)` (S05-12 / INV-1302).
 pub type VipCredentialRecord = ([u8; 32], [u8; 32]);
 
-/// Persistent ingress accounting state tracking local day sequence and cumulative consumption (S05-11).
+/// Persistent ingress accounting state tracking local day sequence, cumulative consumption,
+/// and sufficient fixed-point write/read EMA continuity anchors across restarts (S05-11, S05-15).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PersistedIngressAccountingState {
     pub current_day: u64,
+    pub last_epoch_seq: u64,
     pub reserved_epoch_seq: u64,
     pub last_timestamp_ms: u64,
     pub cumulative_micro_byte_years: u64,
     pub prev_day_final_bytes: u64,
+    pub write_ema_scaled: u128,
+    pub last_write_ema_sec: Option<u64>,
+    pub read_ema_scaled: u128,
+    pub last_read_ema_sec: Option<u64>,
 }
 
 /// Node-local original signing protection. Never included in shard synchronization.
@@ -1095,7 +1101,7 @@ impl RedbStorage {
         }
     }
 
-    /// Durably persists ingress accounting state with monotonic high-water check (S05-11).
+    /// Durably persists ingress accounting state with monotonic high-water check (S05-11, S05-15).
     pub fn store_ingress_accounting_state(
         &self,
         state: &PersistedIngressAccountingState,
@@ -1107,14 +1113,17 @@ impl RedbStorage {
             if let Some(existing) = table.get(0u8)? {
                 let existing_state: PersistedIngressAccountingState =
                     bincode::deserialize(existing.value())?;
-                // Monotonic high-water check so older batches can never regress stored (current_day, reserved_epoch_seq)
-                if state.current_day < existing_state.current_day
+                // Monotonic high-water check so older batches can never regress stored accounting state
+                let is_older_or_equal = state.current_day < existing_state.current_day
                     || (state.current_day == existing_state.current_day
-                        && state.reserved_epoch_seq < existing_state.reserved_epoch_seq)
-                    || (state.current_day == existing_state.current_day
-                        && state.reserved_epoch_seq == existing_state.reserved_epoch_seq
-                        && state.cumulative_micro_byte_years <= existing_state.cumulative_micro_byte_years)
-                {
+                        && (state.last_epoch_seq < existing_state.last_epoch_seq
+                            || (state.last_epoch_seq == existing_state.last_epoch_seq
+                                && (state.reserved_epoch_seq < existing_state.reserved_epoch_seq
+                                    || (state.reserved_epoch_seq == existing_state.reserved_epoch_seq
+                                        && (state.cumulative_micro_byte_years < existing_state.cumulative_micro_byte_years
+                                            || (state.cumulative_micro_byte_years == existing_state.cumulative_micro_byte_years
+                                                && state.last_timestamp_ms <= existing_state.last_timestamp_ms)))))));
+                if is_older_or_equal {
                     return Ok(());
                 }
             }

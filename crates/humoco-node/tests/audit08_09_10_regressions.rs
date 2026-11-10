@@ -8,6 +8,7 @@
 //! - A10-02: Automatic ShardEquivocation detection for conflicting original attestations
 
 use ed25519_dalek::Signer;
+use redb::ReadableTable;
 use humoco_node::{
     config::NodeConfig,
     control::ControlServer,
@@ -18,7 +19,13 @@ use humoco_node::{
     NodeIdentity,
 };
 use humoco_sim_core::wire::{MsgType, WireHeader};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 async fn relay_probe(signed: bool) {
@@ -495,29 +502,38 @@ async fn a10_conflicting_original_attestations_trigger_automatic_shard_equivocat
     let att2_conflict = sign_att([2u8; 32]);
 
     // Vote 1: legitimate, no fraud
-    let res1 = pm.observe_verified_original_attestation(
-        *mal_signer.node_pubkey(),
-        att1,
-        NetworkId::Mainnet,
-    );
+    let res1 = pm
+        .observe_verified_original_attestation(
+            *mal_signer.node_pubkey(),
+            att1,
+            NetworkId::Mainnet,
+        )
+        .await
+        .unwrap();
     assert!(res1.is_none());
     assert!(!db.is_node_banned(mal_signer.node_pubkey()).unwrap());
 
     // Identical retry: no fraud
-    let res_retry = pm.observe_verified_original_attestation(
-        *mal_signer.node_pubkey(),
-        att1_retry,
-        NetworkId::Mainnet,
-    );
+    let res_retry = pm
+        .observe_verified_original_attestation(
+            *mal_signer.node_pubkey(),
+            att1_retry,
+            NetworkId::Mainnet,
+        )
+        .await
+        .unwrap();
     assert!(res_retry.is_none());
     assert!(!db.is_node_banned(mal_signer.node_pubkey()).unwrap());
 
     // Diverging vote for same parent_lock: automatically detected, committed and banned!
-    let res2 = pm.observe_verified_original_attestation(
-        *mal_signer.node_pubkey(),
-        att2_conflict,
-        NetworkId::Mainnet,
-    );
+    let res2 = pm
+        .observe_verified_original_attestation(
+            *mal_signer.node_pubkey(),
+            att2_conflict,
+            NetworkId::Mainnet,
+        )
+        .await
+        .unwrap();
     assert!(res2.is_some());
     let proof = res2.unwrap();
     assert_eq!(proof.perpetrator_node_id, *mal_signer.node_pubkey());
@@ -668,5 +684,567 @@ async fn a08_legacy_unsigned_tuple_relay_must_never_learn_or_authorize_third_par
     b.close();
     a.drain_tasks().await;
     b.drain_tasks().await;
+}
+
+#[derive(Clone, Debug)]
+struct FaultBackend {
+    inner: Arc<redb::backends::InMemoryBackend>,
+    fail_write: Arc<AtomicBool>,
+}
+
+impl redb::StorageBackend for FaultBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        self.inner.len()
+    }
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner.set_len(len)
+    }
+    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+        self.inner.read(offset, len)
+    }
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        if self.fail_write.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("injected storage write fault"));
+        }
+        self.inner.write(offset, data)
+    }
+    fn sync_data(&self, eventual: bool) -> Result<(), std::io::Error> {
+        if self.fail_write.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("injected storage sync fault"));
+        }
+        self.inner.sync_data(eventual)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_s06_12_contention_and_guard_non_retention() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(RedbStorage::open(&temp.path().join("contention.redb")).unwrap());
+    let (engine, worker) = DualTierEngine::new(db.clone());
+    let pm = Arc::new(PeerManager::new(vec![]));
+    engine.set_peer_manager(pm.clone()).await;
+
+    let mal_signer = NodeIdentity::generate();
+    let unrelated_signer = NodeIdentity::generate();
+    let parent_lock = [0x77u8; 32];
+    let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+
+    let unrelated_parent = [0x88u8; 32];
+    let unrelated_shard = u16::from_be_bytes([unrelated_parent[0], unrelated_parent[1]]);
+
+    let now_ms = pm.net_time_ms();
+    let att1 = humoco_node::api::routes::create_attestation_for_network(
+        &mal_signer,
+        [0x01; 32],
+        parent_lock,
+        shard_id,
+        0,
+        now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let att2_conflict = humoco_node::api::routes::create_attestation_for_network(
+        &mal_signer,
+        [0x02; 32],
+        parent_lock,
+        shard_id,
+        0,
+        now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let unrelated_att = humoco_node::api::routes::create_attestation_for_network(
+        &unrelated_signer,
+        [0x33; 32],
+        unrelated_parent,
+        unrelated_shard,
+        0,
+        now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+
+    // Initial valid attestation
+    assert!(
+        humoco_node::api::routes::verify_peer_attestation(
+            &pm,
+            &att1,
+            ([0x01; 32], parent_lock),
+            shard_id,
+            0,
+            humoco_sim_core::types::NetworkId::Mainnet,
+            Some(*mal_signer.node_pubkey()),
+        )
+        .await
+        .unwrap()
+    );
+
+    // Hold a redb write transaction in a separate OS thread for 250 ms
+    let db_clone = db.clone();
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let write_txn = db_clone.raw_database_for_test().begin_write().unwrap();
+        let _ = held_tx.send(());
+        std::thread::sleep(Duration::from_millis(250));
+        drop(write_txn);
+    });
+    held_rx.await.unwrap();
+
+    // Now spawn the conflicting attestation verification which must persist to redb
+    let pm_clone = pm.clone();
+    let mal_pk = *mal_signer.node_pubkey();
+    let conflict_handle = tokio::spawn(async move {
+        humoco_node::api::routes::verify_peer_attestation(
+            &pm_clone,
+            &att2_conflict,
+            ([0x02; 32], parent_lock),
+            shard_id,
+            0,
+            humoco_sim_core::types::NetworkId::Mainnet,
+            Some(mal_pk),
+        )
+        .await
+    });
+
+    // Let the conflict task enter verify_peer_attestation and attempt to persist
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Assert that an unrelated cache observation progresses and completes promptly (< 80 ms)
+    let unrelated_start = tokio::time::Instant::now();
+    let unrelated_ok = humoco_node::api::routes::verify_peer_attestation(
+        &pm,
+        &unrelated_att,
+        ([0x33; 32], unrelated_parent),
+        unrelated_shard,
+        0,
+        humoco_sim_core::types::NetworkId::Mainnet,
+        Some(*unrelated_signer.node_pubkey()),
+    )
+    .await
+    .unwrap();
+    let unrelated_elapsed = unrelated_start.elapsed();
+
+    // And assert independent Tokio runtime timer progresses promptly (< 80 ms)
+    let timer_start = tokio::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let timer_elapsed = timer_start.elapsed();
+
+    let conflict_res = conflict_handle.await.unwrap().unwrap();
+    assert!(!conflict_res, "Conflicting attestation must be rejected");
+
+    assert!(timer_elapsed < Duration::from_millis(80), "Independent Tokio timer must not be starved, took {:?}", timer_elapsed);
+    assert!(
+        unrelated_elapsed < Duration::from_millis(80),
+        "Unrelated cache observation must complete promptly (< 80 ms) while redb writer is blocked, took {:?}",
+        unrelated_elapsed
+    );
+    assert!(unrelated_ok);
+    assert!(db.is_node_banned(mal_signer.node_pubkey()).unwrap());
+
+    worker.abort();
+    let _ = worker.await;
+}
+
+#[tokio::test]
+async fn test_s06_13_storage_write_failure_retains_evidence_and_flushes_durable() {
+    let fail_write = Arc::new(AtomicBool::new(false));
+    let backend = FaultBackend {
+        inner: Arc::new(redb::backends::InMemoryBackend::new()),
+        fail_write: fail_write.clone(),
+    };
+    let db = Arc::new(RedbStorage::open_with_backend(backend.clone(), std::path::Path::new("/tmp/test_fault.redb")).unwrap());
+    let (engine, worker) = DualTierEngine::new(db.clone());
+    let pm = Arc::new(PeerManager::new(vec![]));
+    engine.set_peer_manager(pm.clone()).await;
+
+    let mal_signer = NodeIdentity::generate();
+    let parent_lock = [0x55; 32];
+    let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+    let now_ms = pm.net_time_ms();
+    let att1 = humoco_node::api::routes::create_attestation_for_network(
+        &mal_signer,
+        [0x01; 32],
+        parent_lock,
+        shard_id,
+        0,
+        now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let att2_conflict = humoco_node::api::routes::create_attestation_for_network(
+        &mal_signer,
+        [0x02; 32],
+        parent_lock,
+        shard_id,
+        0,
+        now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+
+    // Saturate forwarding channel with sentinel (channel capacity = 1)
+    let (fraud_tx, mut fraud_rx) = tokio::sync::mpsc::channel(1);
+    let sentinel = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        att1.to_core().unwrap(),
+        att1.to_core().unwrap(),
+        [0xAA; 32],
+    );
+    fraud_tx.try_send((sentinel, None)).unwrap();
+    pm.set_fraud_proof_tx(fraud_tx).await;
+
+    // Initial valid attestation
+    assert!(
+        humoco_node::api::routes::verify_peer_attestation(
+            &pm,
+            &att1,
+            ([0x01; 32], parent_lock),
+            shard_id,
+            0,
+            humoco_sim_core::types::NetworkId::Mainnet,
+            Some(*mal_signer.node_pubkey()),
+        )
+        .await
+        .unwrap()
+    );
+
+    // Inject storage write failure
+    fail_write.store(true, Ordering::SeqCst);
+
+    // Feed conflicting attestation
+    let verify_res = humoco_node::api::routes::verify_peer_attestation(
+        &pm,
+        &att2_conflict,
+        ([0x02; 32], parent_lock),
+        shard_id,
+        0,
+        humoco_sim_core::types::NetworkId::Mainnet,
+        Some(*mal_signer.node_pubkey()),
+    )
+    .await;
+
+    // Requirement 1: Observable failure from the observer/verifier when persistence fails
+    assert!(
+        verify_res.is_err(),
+        "Must return observable failure when storage persistence fails"
+    );
+
+    // Requirement 2: Justified local RAM containment (is_banned == true) immediately active
+    assert!(
+        pm.is_banned(mal_signer.node_pubkey()).await,
+        "PeerManager must have offender banned in RAM immediately"
+    );
+    assert!(
+        engine.is_node_banned(mal_signer.node_pubkey()).await,
+        "DualTierEngine must have offender banned in RAM immediately"
+    );
+
+    // Storage write failed, so node is NOT banned in redb yet
+    assert!(!db.is_node_banned(mal_signer.node_pubkey()).unwrap());
+
+    // Requirement 3: Retained evidence ownership in memory even though redb commit and try_send failed
+    // Clear storage fault and drain sentinel from forwarding channel
+    fail_write.store(false, Ordering::SeqCst);
+    let drained_sentinel = fraud_rx.try_recv().unwrap();
+    assert_eq!(drained_sentinel.0.perpetrator_node_id, [0xAA; 32]);
+
+    // Reopen clean storage on the same backend to clear redb's poisoned PreviousIo state
+    let reopened = Arc::new(RedbStorage::open_with_backend(backend.clone(), std::path::Path::new("/tmp/test_fault.redb")).unwrap());
+    pm.set_storage(Arc::downgrade(&reopened));
+
+    // Requirement 4: After clearing storage fault and freeing channel, retrying/flushing pending evidence
+    // succeeds without needing remote resubmission of the conflicting vote!
+    let flush_res = pm.flush_pending_slashing_evidence().await;
+    assert!(flush_res.is_ok(), "Flush must succeed once fault is cleared: {:?}", flush_res.err());
+    assert_eq!(flush_res.unwrap(), 1, "Exactly 1 evidence item flushed");
+
+    // Forwarding queue now received the forwarded proof!
+    let forwarded_proof = fraud_rx.try_recv().expect("Fraud proof must be queued for forwarding");
+    assert_eq!(forwarded_proof.0.perpetrator_node_id, *mal_signer.node_pubkey());
+
+    // Reopening RedbStorage confirms durable persistence
+    assert!(
+        reopened.is_node_banned(mal_signer.node_pubkey()).unwrap(),
+        "Reopened storage must confirm offender is durably banned"
+    );
+
+    // Check TABLE_SLASHING_EVIDENCE contains the proof
+    let read_txn = reopened.raw_database_for_test().begin_read().unwrap();
+    let table = read_txn.open_table(humoco_node::storage::db::TABLE_SLASHING_EVIDENCE).unwrap();
+    assert_eq!(table.iter().unwrap().count(), 1, "Slashing evidence table must contain persisted proof");
+
+    worker.abort();
+    let _ = worker.await;
+}
+
+#[tokio::test]
+async fn test_s06_commit_control_and_cancellation_safety() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(RedbStorage::open(&temp.path().join("control.redb")).unwrap());
+    let (engine, worker) = DualTierEngine::new(db.clone());
+    let pm = Arc::new(PeerManager::new(vec![]));
+    engine.set_peer_manager(pm.clone()).await;
+
+    let mal_signer = NodeIdentity::generate();
+    let parent_lock = [0x66; 32];
+    let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+    let now_ms = pm.net_time_ms();
+    let att1 = humoco_node::api::routes::create_attestation_for_network(
+        &mal_signer,
+        [0x01; 32],
+        parent_lock,
+        shard_id,
+        0,
+        now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let att2_conflict = humoco_node::api::routes::create_attestation_for_network(
+        &mal_signer,
+        [0x02; 32],
+        parent_lock,
+        shard_id,
+        0,
+        now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+
+    let (fraud_tx, mut fraud_rx) = tokio::sync::mpsc::channel(10);
+    pm.set_fraud_proof_tx(fraud_tx).await;
+
+    // Healthy commit control:
+    // 1. Initial vote
+    assert!(
+        humoco_node::api::routes::verify_peer_attestation(
+            &pm,
+            &att1,
+            ([0x01; 32], parent_lock),
+            shard_id,
+            0,
+            humoco_sim_core::types::NetworkId::Mainnet,
+            Some(*mal_signer.node_pubkey()),
+        )
+        .await
+        .unwrap()
+    );
+
+    // 2. Conflict detected -> persisted to redb, banned in RAM, queued for forwarding
+    let conflict_res = humoco_node::api::routes::verify_peer_attestation(
+        &pm,
+        &att2_conflict,
+        ([0x02; 32], parent_lock),
+        shard_id,
+        0,
+        humoco_sim_core::types::NetworkId::Mainnet,
+        Some(*mal_signer.node_pubkey()),
+    )
+    .await
+    .unwrap();
+    assert!(!conflict_res);
+
+    assert!(db.is_node_banned(mal_signer.node_pubkey()).unwrap());
+    assert!(pm.is_banned(mal_signer.node_pubkey()).await);
+    assert!(engine.is_node_banned(mal_signer.node_pubkey()).await);
+
+    let forwarded = fraud_rx.try_recv().unwrap();
+    assert_eq!(forwarded.0.perpetrator_node_id, *mal_signer.node_pubkey());
+
+    // Cancellation safety: aborting tasks does not poison mutex or lose pending state
+    let pm_clone = pm.clone();
+    let task = tokio::spawn(async move {
+        let _ = pm_clone.flush_pending_slashing_evidence().await;
+    });
+    task.abort();
+    let _ = task.await;
+
+    // Mutex remains healthy and unpoisoned
+    assert_eq!(pm.flush_pending_slashing_evidence().await.unwrap(), 0);
+
+    worker.abort();
+    let _ = worker.await;
+}
+
+struct EquivocationMockHandler {
+    peer_identity: NodeIdentity,
+    lock_id: [u8; 32],
+    parent_lock: [u8; 32],
+    shard_id: u16,
+}
+
+impl humoco_node::network::RequestHandler for EquivocationMockHandler {
+    fn handle(
+        &self,
+        _header: humoco_sim_core::wire::WireHeader,
+        _payload: Vec<u8>,
+    ) -> humoco_node::network::BoxFuture<Result<(humoco_sim_core::wire::WireHeader, Vec<u8>), humoco_node::NodeError>> {
+        let lock_id = self.lock_id;
+        let parent_lock = self.parent_lock;
+        let shard_id = self.shard_id;
+        let peer_identity = self.peer_identity.clone();
+
+        Box::pin(async move {
+            let att = humoco_node::api::routes::create_attestation_for_network(
+                &peer_identity,
+                lock_id,
+                parent_lock,
+                shard_id,
+                0,
+                1000,
+                humoco_sim_core::types::NetworkId::Mainnet,
+            );
+            let wire_bytes = bincode::serialize(&att)
+                .map_err(|e| humoco_node::NodeError::Network(e.to_string()))?;
+            let resp_header = humoco_sim_core::wire::WireHeader::new(
+                humoco_sim_core::wire::MsgType::LockVerifyResponse as u16,
+                1,
+                0,
+                0,
+                wire_bytes.len() as u32,
+            );
+            Ok((resp_header, wire_bytes))
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_s06_real_quic_collector_equivocation_and_storage_fault_isolation() {
+    let fail_write = Arc::new(AtomicBool::new(false));
+    let backend = FaultBackend {
+        inner: Arc::new(redb::backends::InMemoryBackend::new()),
+        fail_write: fail_write.clone(),
+    };
+    let client_db = Arc::new(RedbStorage::open_with_backend(backend.clone(), std::path::Path::new("/tmp/client_fault.redb")).unwrap());
+    let (client_engine, worker) = DualTierEngine::new(client_db.clone());
+
+    let client_id = NodeIdentity::generate();
+    let client_cancel = CancellationToken::new();
+    let client_pm = Arc::new(PeerManager::new(Vec::new()));
+    client_pm.set_simulation_mode(true);
+    client_engine.set_peer_manager(client_pm.clone()).await;
+
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &client_id,
+        client_pm.clone(),
+        Arc::new(humoco_node::network::DefaultRequestHandler),
+        client_cancel.clone(),
+    )
+    .unwrap();
+    let client_addr = client_transport.local_addr().unwrap();
+    client_transport.set_sync_ready(true);
+    client_transport.spawn_accept_loop();
+
+    let peer_id = NodeIdentity::generate();
+    let peer_cancel = CancellationToken::new();
+    let peer_pm = Arc::new(PeerManager::new(Vec::new()));
+    peer_pm.set_simulation_mode(true);
+    let parent_lock = [0x78; 32];
+    let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+
+    let mock_handler = Arc::new(EquivocationMockHandler {
+        peer_identity: peer_id.clone(),
+        lock_id: [0x02; 32], // Peer will respond with lock_id 0x02
+        parent_lock,
+        shard_id,
+    });
+
+    let peer_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &peer_id,
+        peer_pm.clone(),
+        mock_handler,
+        peer_cancel.clone(),
+    )
+    .unwrap();
+    let peer_addr = peer_transport.local_addr().unwrap();
+    peer_transport.set_sync_ready(true);
+    peer_transport.spawn_accept_loop();
+
+    // Mutual F2F registration
+    client_pm.register_f2f_friend(*peer_id.node_pubkey(), Some(peer_addr)).await;
+    peer_pm.register_f2f_friend(*client_id.node_pubkey(), Some(client_addr)).await;
+
+    // Client previously observed peer's approval for lock_id 0x01 on parent_lock
+    let prior_att = humoco_node::api::routes::create_attestation_for_network(
+        &peer_id,
+        [0x01; 32],
+        parent_lock,
+        shard_id,
+        0,
+        1000,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    assert!(
+        humoco_node::api::routes::verify_peer_attestation(
+            &client_pm,
+            &prior_att,
+            ([0x01; 32], parent_lock),
+            shard_id,
+            0,
+            humoco_sim_core::types::NetworkId::Mainnet,
+            Some(*peer_id.node_pubkey()),
+        )
+        .await
+        .unwrap()
+    );
+
+    // Initial peer status: zero failures
+    let initial_peer = client_pm.get_peer(&peer_addr).await.expect("peer present");
+    assert_eq!(initial_peer.missing_count, 0);
+
+    // CASE 1: Client has local storage fault (fail_write == true)
+    fail_write.store(true, Ordering::SeqCst);
+
+    let candidates = [(*peer_id.node_pubkey(), peer_addr)];
+    let expected_members = [*peer_id.node_pubkey()];
+    let query_payload = [0u8; 32];
+
+    let mut collected = Vec::new();
+    let query = humoco_node::PeerAttestationQuery {
+        transport: &client_transport,
+        peer_mgr: &client_pm,
+        candidate_nodes: &candidates,
+        expected_members: Some(&expected_members),
+        parent_lock,
+        lookup_tag: None,
+        voucher_id: None,
+        msg_type: MsgType::LockVerifyRequest,
+        resp_msg_type: MsgType::LockVerifyResponse,
+        payload: &query_payload,
+        lock_id: [0x02; 32],
+        target_status: 0,
+        shard_id,
+        required_q: 1,
+        shard_query_depth: 1,
+        my_load: 0,
+        quota_limit: 10_000,
+        network_id: humoco_sim_core::types::NetworkId::Mainnet,
+        checkout_deadline: None,
+    };
+
+    let _ = humoco_node::collect_peer_attestations(query, &mut collected).await;
+
+    // Crucial Invariant: Offender is immediately held in RAM containment and suspended
+    assert!(client_pm.is_banned(peer_id.node_pubkey()).await);
+    let peer_after_fault = client_pm.get_peer(&peer_addr).await.expect("peer present");
+    assert_eq!(peer_after_fault.status, humoco_node::PeerStatus::Suspended);
+    assert_eq!(
+        peer_after_fault.missing_count,
+        humoco_node::network::peer::FAILURE_THRESHOLD_SUSPENDED,
+        "Offender is marked suspended via ban_node containment"
+    );
+
+    // CASE 2: Fault cleared -> Flush pending evidence durably persists
+    fail_write.store(false, Ordering::SeqCst);
+    let reopened = Arc::new(RedbStorage::open_with_backend(backend, std::path::Path::new("/tmp/client_fault.redb")).unwrap());
+    client_pm.set_storage(Arc::downgrade(&reopened));
+    let flushed = client_pm.flush_pending_slashing_evidence().await.unwrap();
+    assert!(flushed >= 1);
+
+    // Reopening storage confirms durable ban
+    assert!(reopened.is_node_banned(peer_id.node_pubkey()).unwrap());
+
+    client_cancel.cancel();
+    peer_cancel.cancel();
+    client_transport.close();
+    peer_transport.close();
+    client_transport.drain_tasks().await;
+    peer_transport.drain_tasks().await;
+
+    worker.abort();
+    let _ = worker.await;
 }
 

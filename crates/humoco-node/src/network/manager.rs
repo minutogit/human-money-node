@@ -604,11 +604,25 @@ impl HeartbeatDedupCache {
     }
 }
 
+/// Retained verified pending evidence until both durable redb commit and forwarding succeed (S06-13 / INV-1402).
+#[derive(Debug, Clone)]
+pub struct PendingSlashingEvidence {
+    pub proof: humoco_sim_core::fraud::FraudProofPayload,
+    pub evidence_hash: [u8; 32],
+    pub proof_bytes: Vec<u8>,
+    pub offender: [u8; 32],
+    pub detected_ms: u64,
+    pub durable_committed: bool,
+    pub forward_queued: bool,
+}
+
 /// Bounded LRU cache of observed original shard attestations for equivocation detection (A10-02).
 #[derive(Debug)]
 pub struct ObservedVoteCache {
     map: HashMap<([u8; 32], [u8; 32]), humoco_sim_core::types::Attestation>,
     queue: std::collections::VecDeque<([u8; 32], [u8; 32])>,
+    pending_evidence: HashMap<[u8; 32], PendingSlashingEvidence>,
+    pending_queue: std::collections::VecDeque<[u8; 32]>,
     capacity: usize,
 }
 
@@ -617,6 +631,8 @@ impl ObservedVoteCache {
         Self {
             map: HashMap::with_capacity(capacity.min(4096)),
             queue: std::collections::VecDeque::with_capacity(capacity.min(4096)),
+            pending_evidence: HashMap::with_capacity(capacity.min(1024)),
+            pending_queue: std::collections::VecDeque::with_capacity(capacity.min(1024)),
             capacity,
         }
     }
@@ -645,6 +661,64 @@ impl ObservedVoteCache {
         self.map.insert(key, att);
         self.queue.push_back(key);
         Ok(())
+    }
+
+    /// Inserts or updates pending slashing evidence.
+    pub fn insert_pending_evidence(&mut self, evidence: PendingSlashingEvidence) {
+        let hash = evidence.evidence_hash;
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.pending_evidence.entry(hash) {
+            e.insert(evidence);
+            return;
+        }
+        if self.pending_queue.len() >= self.capacity {
+            if let Some(oldest) = self.pending_queue.pop_front() {
+                self.pending_evidence.remove(&oldest);
+            }
+        }
+        self.pending_evidence.insert(hash, evidence);
+        self.pending_queue.push_back(hash);
+    }
+
+    pub fn mark_durable_committed(&mut self, hash: &[u8; 32]) {
+        if let Some(ev) = self.pending_evidence.get_mut(hash) {
+            ev.durable_committed = true;
+        }
+    }
+
+    pub fn mark_forward_queued(&mut self, hash: &[u8; 32]) {
+        if let Some(ev) = self.pending_evidence.get_mut(hash) {
+            ev.forward_queued = true;
+        }
+    }
+
+    pub fn remove_if_settled(&mut self, hash: &[u8; 32]) -> bool {
+        if let Some(ev) = self.pending_evidence.get(hash) {
+            if ev.durable_committed && ev.forward_queued {
+                self.pending_evidence.remove(hash);
+                self.pending_queue.retain(|h| h != hash);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn get_unsettled_pending(&self) -> Vec<PendingSlashingEvidence> {
+        self.pending_evidence
+            .values()
+            .filter(|ev| !ev.durable_committed || !ev.forward_queued)
+            .cloned()
+            .collect()
+    }
+
+    pub fn find_pending_for_offender(&self, offender: &[u8; 32]) -> Option<PendingSlashingEvidence> {
+        self.pending_evidence
+            .values()
+            .find(|ev| &ev.offender == offender && (!ev.durable_committed || !ev.forward_queued))
+            .cloned()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending_evidence.len()
     }
 }
 
@@ -1585,20 +1659,20 @@ impl PeerManager {
         *guard = Some(engine.banned_nodes.clone());
     }
 
-    /// Observes a verified original attestation for equivocation / cartel detection (A10-02).
+    /// Observes a verified original attestation for equivocation / cartel detection (A10-02, S06-12, S06-13).
     ///
     /// If a differing original vote (`lock_a != lock_b`) is detected for the same `(signer_pubkey, parent_lock)`
     /// under `expected_network`, this automatically constructs `FraudProofPayload::new_shard_equivocation_with_pubkey`,
-    /// atomically commits the slashing evidence and ban to storage (if available), bans the peer in RAM and PeerManager,
-    /// broadcasts the fraud proof to all F2F friends, and returns `Some(proof)`.
-    pub fn observe_verified_original_attestation(
+    /// registers verified pending evidence in RAM, immediately applies in-RAM ban containment, commits the slashing
+    /// evidence and ban to storage via bounded async persistence without holding cache mutexes, and queues for broadcast.
+    pub async fn observe_verified_original_attestation(
         &self,
         signer_pubkey: [u8; 32],
         att: humoco_sim_core::types::Attestation,
         expected_network: humoco_sim_core::types::NetworkId,
-    ) -> Option<humoco_sim_core::fraud::FraudProofPayload> {
+    ) -> Result<Option<humoco_sim_core::fraud::FraudProofPayload>, crate::error::NodeError> {
         let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&signer_pubkey) else {
-            return None;
+            return Ok(None);
         };
         let shard = att.shard_id;
         let payload = humoco_sim_core::crypto::compute_attestation_payload_digest(
@@ -1607,7 +1681,7 @@ impl PeerManager {
         );
         let sig = match ed25519_dalek::Signature::from_slice(&att.signature) {
             Ok(s) => s,
-            Err(_) => return None,
+            Err(_) => return Ok(None),
         };
         let prov_domain = humoco_sim_core::crypto::domain_approve_prov(expected_network);
         let final_domain = humoco_sim_core::crypto::domain_approve_final(expected_network);
@@ -1621,66 +1695,215 @@ impl PeerManager {
                     vk.verify_strict(&digest, &sig).is_ok()
                 });
         if !is_valid {
-            return None;
+            return Ok(None);
         }
 
-        let mut cache = self.observed_votes.lock();
-        match cache.insert_or_detect_equivocation(signer_pubkey, att.clone()) {
-            Ok(()) => None,
-            Err(prev_att) => {
-                warn!(
-                    offender = %hex::encode(signer_pubkey),
-                    parent_lock = %hex::encode(att.parent_lock),
-                    lock_a = %hex::encode(prev_att.lock_id),
-                    lock_b = %hex::encode(att.lock_id),
-                    "CRITICAL FRAUD: Conflicting original shard attestations detected! Automatic ShardEquivocation proof generated."
-                );
-                let proof =
-                    humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
-                        prev_att,
-                        att,
-                        signer_pubkey,
-                    );
-                if !crate::network::transport::verify_equivocation_first_party_network(
-                    expected_network,
-                    &vk,
-                    &proof,
-                ) {
-                    warn!("Generated ShardEquivocation self-proof failed first-party verification");
-                    return None;
+        // Retry any pending uncommitted/unforwarded evidence for this offender
+        let pending_existing = {
+            let cache = self.observed_votes.lock();
+            cache.find_pending_for_offender(&signer_pubkey)
+        };
+
+        if let Some(existing) = pending_existing {
+            self.flush_pending_slashing_evidence().await?;
+            return Ok(Some(existing.proof));
+        }
+
+        // Limit mutex lock strictly to in-memory cache lookup / insertion (S06-12)
+        let conflict_opt = {
+            let mut cache = self.observed_votes.lock();
+            cache.insert_or_detect_equivocation(signer_pubkey, att.clone()).err()
+        };
+
+        let Some(prev_att) = conflict_opt else {
+            return Ok(None);
+        };
+
+        warn!(
+            offender = %hex::encode(signer_pubkey),
+            parent_lock = %hex::encode(att.parent_lock),
+            lock_a = %hex::encode(prev_att.lock_id),
+            lock_b = %hex::encode(att.lock_id),
+            "CRITICAL FRAUD: Conflicting original shard attestations detected! Automatic ShardEquivocation proof generated."
+        );
+
+        let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+            prev_att,
+            att,
+            signer_pubkey,
+        );
+
+        if !crate::network::transport::verify_equivocation_first_party_network(
+            expected_network,
+            &vk,
+            &proof,
+        ) {
+            warn!("Generated ShardEquivocation self-proof failed first-party verification");
+            return Ok(None);
+        }
+
+        let proof_bytes = bincode::serialize(&proof).map_err(|e| {
+            crate::error::NodeError::Crypto(format!("Failed to serialize fraud proof: {e}"))
+        })?;
+        let evidence_hash = *blake3::hash(&proof_bytes).as_bytes();
+        let now_ms = self.net_time_ms();
+
+        // Retain verified pending evidence in RAM under quick lock (S06-13 / INV-1402)
+        let mut evidence = PendingSlashingEvidence {
+            proof: proof.clone(),
+            evidence_hash,
+            proof_bytes: proof_bytes.clone(),
+            offender: signer_pubkey,
+            detected_ms: now_ms,
+            durable_committed: false,
+            forward_queued: false,
+        };
+
+        {
+            let mut cache = self.observed_votes.lock();
+            cache.insert_pending_evidence(evidence.clone());
+        }
+
+        // Apply local RAM containment directly via .await (no guards held across .await, no unbounded detached spawns)
+        let engine_banned = self.engine_banned_nodes.read().as_ref().cloned();
+        if let Some(engine_banned) = engine_banned {
+            engine_banned.write().await.insert(signer_pubkey);
+        }
+        self.ban_node(&signer_pubkey).await;
+
+        // Bounded async persistence via spawn_blocking awaited directly (no guards held across .await)
+        let mut persist_err: Option<crate::error::NodeError> = None;
+        let storage = self.storage.read().as_ref().and_then(|w| w.upgrade());
+        if let Some(storage) = storage {
+            let ev_hash = evidence_hash;
+            let raw_ev = proof_bytes;
+            let offender_pk = signer_pubkey;
+            let ts = now_ms;
+
+            let res = tokio::task::spawn_blocking(move || {
+                storage.commit_slashing_evidence_and_ban(&ev_hash, &raw_ev, &offender_pk, ts)
+            })
+            .await;
+
+            match res {
+                Ok(Ok(())) => {
+                    evidence.durable_committed = true;
+                    let mut cache = self.observed_votes.lock();
+                    cache.mark_durable_committed(&evidence_hash);
                 }
+                Ok(Err(e)) => {
+                    warn!("Failed to atomically commit slashing evidence and ban in redb: {e}");
+                    persist_err = Some(crate::error::NodeError::Storage(e));
+                }
+                Err(join_err) => {
+                    warn!("Storage commit spawn_blocking panicked or cancelled: {join_err}");
+                    persist_err = Some(crate::error::NodeError::Daemon(format!("Storage join error: {join_err}")));
+                }
+            }
+        }
 
-                let proof_bytes = bincode::serialize(&proof).unwrap_or_default();
-                let evidence_hash = *blake3::hash(&proof_bytes).as_bytes();
-                let now_ms = self.net_time_ms();
+        // Forwarding with backpressure/retention
+        let forwarded = self.try_broadcast_fraud_proof(proof.clone(), None);
+        if forwarded {
+            evidence.forward_queued = true;
+            let mut cache = self.observed_votes.lock();
+            cache.mark_forward_queued(&evidence_hash);
+        }
 
-                if let Some(storage) = self.storage.read().as_ref().and_then(|w| w.upgrade()) {
-                    if let Err(e) = storage.commit_slashing_evidence_and_ban(
-                        &evidence_hash,
-                        &proof_bytes,
-                        &signer_pubkey,
-                        now_ms,
-                    ) {
-                        warn!("Failed to atomically commit slashing evidence and ban in redb: {e}");
+        // If fully settled, remove from pending
+        if evidence.durable_committed && evidence.forward_queued {
+            let mut cache = self.observed_votes.lock();
+            cache.remove_if_settled(&evidence_hash);
+        }
+
+        if let Some(err) = persist_err {
+            Err(err)
+        } else {
+            Ok(Some(proof))
+        }
+    }
+
+    /// Flushes any retained pending slashing evidence to durable redb storage and queues for forwarding (S06-13).
+    /// Safe for concurrent calls and periodic maintenance runs.
+    pub async fn flush_pending_slashing_evidence(&self) -> Result<usize, crate::error::NodeError> {
+        let pending = {
+            let cache = self.observed_votes.lock();
+            cache.get_unsettled_pending()
+        };
+
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        let mut flushed_count = 0;
+        let mut first_error: Option<crate::error::NodeError> = None;
+
+        for mut item in pending {
+            let hash = item.evidence_hash;
+
+            // 1. Durable persistence retry if needed
+            if !item.durable_committed {
+                let storage = self.storage.read().as_ref().and_then(|w| w.upgrade());
+                if let Some(storage) = storage {
+                    let ev_hash = item.evidence_hash;
+                    let raw_bytes = item.proof_bytes.clone();
+                    let offender_pk = item.offender;
+                    let ts = item.detected_ms;
+
+                    let res = tokio::task::spawn_blocking(move || {
+                        storage.commit_slashing_evidence_and_ban(&ev_hash, &raw_bytes, &offender_pk, ts)
+                    })
+                    .await;
+
+                    match res {
+                        Ok(Ok(())) => {
+                            item.durable_committed = true;
+                            let mut cache = self.observed_votes.lock();
+                            cache.mark_durable_committed(&hash);
+                        }
+                        Ok(Err(e)) => {
+                            warn!("Retrying durable commit for slashing evidence failed: {e}");
+                            if first_error.is_none() {
+                                first_error = Some(crate::error::NodeError::Storage(e));
+                            }
+                        }
+                        Err(join_err) => {
+                            warn!("Join error on durable commit spawn_blocking: {join_err}");
+                            if first_error.is_none() {
+                                first_error = Some(crate::error::NodeError::Daemon(format!("Join error: {join_err}")));
+                            }
+                        }
                     }
                 }
-
-                if let Some(engine_banned) = self.engine_banned_nodes.read().as_ref().cloned() {
-                    let pk = signer_pubkey;
-                    tokio::spawn(async move {
-                        engine_banned.write().await.insert(pk);
-                    });
-                }
-
-                let pm = self.clone();
-                let pk = signer_pubkey;
-                tokio::spawn(async move {
-                    pm.ban_node(&pk).await;
-                });
-
-                self.broadcast_fraud_proof(proof.clone());
-                Some(proof)
             }
+
+            // Re-ensure in-RAM containment
+            let engine_banned = self.engine_banned_nodes.read().as_ref().cloned();
+            if let Some(engine_banned) = engine_banned {
+                engine_banned.write().await.insert(item.offender);
+            }
+            self.ban_node(&item.offender).await;
+
+            // 2. Forwarding retry if needed
+            if !item.forward_queued && self.try_broadcast_fraud_proof(item.proof.clone(), None) {
+                item.forward_queued = true;
+                let mut cache = self.observed_votes.lock();
+                cache.mark_forward_queued(&hash);
+            }
+
+            // 3. If settled, remove from pending
+            if item.durable_committed && item.forward_queued {
+                let mut cache = self.observed_votes.lock();
+                if cache.remove_if_settled(&hash) {
+                    flushed_count += 1;
+                }
+            }
+        }
+
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(flushed_count)
         }
     }
 
@@ -1798,6 +2021,20 @@ impl PeerManager {
         self.broadcast_fraud_proof_with_sender(proof, None);
     }
 
+    /// Attempts to enqueue a fraud proof for forwarding without dropping. Returns true if queued.
+    pub fn try_broadcast_fraud_proof(
+        &self,
+        proof: humoco_sim_core::fraud::FraudProofPayload,
+        sender: Option<[u8; 32]>,
+    ) -> bool {
+        if let Ok(slot) = self.fraud_proof_tx.try_read() {
+            if let Some(tx) = slot.as_ref() {
+                return tx.try_send((proof, sender)).is_ok();
+            }
+        }
+        false
+    }
+
     /// Queues a fraud proof for F2F broadcast, deduplicated via the LRU
     /// seen-set. `sender` is the immediate peer we received the proof from
     /// (if any) and is excluded on forward (echo protection happens in
@@ -1812,11 +2049,7 @@ impl PeerManager {
         proof: humoco_sim_core::fraud::FraudProofPayload,
         sender: Option<[u8; 32]>,
     ) {
-        if let Ok(slot) = self.fraud_proof_tx.try_read() {
-            if let Some(tx) = slot.as_ref() {
-                let _ = tx.try_send((proof, sender));
-            }
-        }
+        let _ = self.try_broadcast_fraud_proof(proof, sender);
     }
 
     /// Returns the shared Notify handle for triggering bootstrap/shard sync runs.
@@ -3887,8 +4120,12 @@ impl PeerManager {
             .and_then(|info| info.last_read_evidence.clone())
     }
 
-    /// Computes decentralized network median write daily rate and read daily rate across mature known nodes.
-    pub async fn effective_network_medians(&self, now_sec: u64) -> (u64, u64) {
+    /// Computes decentralized network median write daily rate and read daily rate across mature known nodes,
+    /// returning `(Some(write_median), Some(read_median))` only when actual eligible load evidence exists.
+    pub async fn effective_network_medians(
+        &self,
+        now_sec: u64,
+    ) -> (Option<u64>, Option<u64>) {
         let known = self.known_network_nodes.read().await;
         let mut write_rates = Vec::new();
         let mut read_rates = Vec::new();
@@ -3920,15 +4157,15 @@ impl PeerManager {
         }
 
         let write_median = if write_rates.is_empty() {
-            humoco_sim_core::quota::HARD_FLOOR_BASELINE_DAILY
+            None
         } else {
-            humoco_sim_core::quota::QuartileStats::calculate(&write_rates).median
+            Some(humoco_sim_core::quota::QuartileStats::calculate(&write_rates).median)
         };
 
         let read_median = if read_rates.is_empty() {
-            humoco_sim_core::quota::HARD_FLOOR_READ_BASELINE_DAILY
+            None
         } else {
-            humoco_sim_core::quota::QuartileStats::calculate(&read_rates).median
+            Some(humoco_sim_core::quota::QuartileStats::calculate(&read_rates).median)
         };
 
         (write_median, read_median)
@@ -4560,7 +4797,9 @@ mod tests {
 
         // First vote: accepted, no fraud
         assert!(pm
-            .observe_verified_original_attestation(*signer.node_pubkey(), att1, NetworkId::Mainnet,)
+            .observe_verified_original_attestation(*signer.node_pubkey(), att1, NetworkId::Mainnet)
+            .await
+            .unwrap()
             .is_none());
         assert!(!db.is_node_banned(signer.node_pubkey()).unwrap());
 
@@ -4571,6 +4810,8 @@ mod tests {
                 att1_retry,
                 NetworkId::Mainnet,
             )
+            .await
+            .unwrap()
             .is_none());
         assert!(!db.is_node_banned(signer.node_pubkey()).unwrap());
 
@@ -4581,6 +4822,8 @@ mod tests {
                 att2_conflict,
                 NetworkId::Mainnet,
             )
+            .await
+            .unwrap()
             .expect("must detect equivocation");
 
         assert_eq!(proof.perpetrator_node_id, *signer.node_pubkey());

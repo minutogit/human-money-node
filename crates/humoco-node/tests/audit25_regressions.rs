@@ -19,7 +19,7 @@ use tower::ServiceExt;
 use humoco_node::api::{build_router, routes::build_operator_router, AppState};
 use humoco_node::identity::NodeIdentity;
 use humoco_node::ingress::pow::PowEngine;
-use humoco_node::ingress::tier::{is_valid_client_token, IngressError, TierController};
+use humoco_node::ingress::tier::{is_valid_client_token, IngressError, StorageCharge, TierController};
 use humoco_node::storage::{DualTierEngine, RedbStorage};
 
 // ---------------------------------------------------------------------------
@@ -244,7 +244,14 @@ async fn test_a25_05_public_admission_honors_daily_quota_exhaustion() {
     let huge_ttl_seconds = 300_000_000_000u64;
 
     let res = controller
-        .evaluate_and_charge(None, None, None, None, huge_ttl_seconds, Some(&parent))
+        .evaluate_and_charge(
+            None,
+            None,
+            None,
+            None,
+            StorageCharge::single(huge_ttl_seconds),
+            Some(&parent),
+        )
         .await;
 
     // On unfixed code: try_accept_lock return bool was ignored, returning Ok(Tier3Public)!

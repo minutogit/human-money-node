@@ -616,6 +616,8 @@ pub struct NetworkThermometer {
     last_write_ema_sec: Option<u64>,
     read_ema_scaled: u128,
     last_read_ema_sec: Option<u64>,
+    write_initialized: bool,
+    read_initialized: bool,
 }
 
 impl NetworkThermometer {
@@ -629,23 +631,60 @@ impl NetworkThermometer {
             last_write_ema_sec: None,
             read_ema_scaled: 0,
             last_read_ema_sec: None,
+            write_initialized: false,
+            read_initialized: false,
         }
     }
 
+    /// Whether the 28-day write history buffer has completed cold-start initialization
+    pub fn is_write_initialized(&self) -> bool {
+        self.write_initialized
+    }
+
+    /// Whether the 28-day read history buffer has completed cold-start initialization
+    pub fn is_read_initialized(&self) -> bool {
+        self.read_initialized
+    }
+
     /// [INV-0907]
-    /// Initializes the thermometer of a new node with the current peer median
+    /// Initializes the write thermometer of a new node with the current peer median (one-time cold start)
     pub fn seed_from_peers(&mut self, peer_median: u64) {
-        self.ring_buffer.seed(peer_median);
+        if !self.write_initialized {
+            self.ring_buffer
+                .seed_with_floor(peer_median, HARD_FLOOR_BASELINE_DAILY);
+            self.write_initialized = true;
+        }
     }
 
     /// [INV-0908]
-    /// Fast re-seed on network merges (e.g. village A docks onto the global mesh)
-    pub fn fast_reseed_on_merge(&mut self, global_median: u64) {
-        self.ring_buffer.seed(global_median);
-        self.read_ring_buffer.seed_with_floor(
-            global_median / READ_TO_WRITE_RATIO,
-            HARD_FLOOR_READ_BASELINE_DAILY,
-        );
+    /// Fast re-seed on network merges (e.g. village A docks onto the global mesh).
+    /// Reseeds write and read buffers only when eligible peer evidence exists,
+    /// falling back to write / READ_TO_WRITE_RATIO only when write evidence exists without read evidence.
+    pub fn fast_reseed_on_merge(
+        &mut self,
+        write_median: Option<u64>,
+        read_median: Option<u64>,
+    ) {
+        if let Some(w) = write_median {
+            self.ring_buffer
+                .seed_with_floor(w, HARD_FLOOR_BASELINE_DAILY);
+            self.write_initialized = true;
+            if let Some(r) = read_median {
+                self.read_ring_buffer
+                    .seed_with_floor(r, HARD_FLOOR_READ_BASELINE_DAILY);
+                self.read_initialized = true;
+            } else {
+                self.read_ring_buffer.seed_with_floor(
+                    w / READ_TO_WRITE_RATIO,
+                    HARD_FLOOR_READ_BASELINE_DAILY,
+                );
+                self.read_initialized = true;
+            }
+        } else if let Some(r) = read_median {
+            self.read_ring_buffer
+                .seed_with_floor(r, HARD_FLOOR_READ_BASELINE_DAILY);
+            self.read_initialized = true;
+        }
     }
 
     /// Adds a daily median (called at the end of a day)
@@ -823,18 +862,13 @@ impl NetworkThermometer {
         self.node_read_usage.get(&node_id)
     }
 
-    /// Initializes the read thermometer of a new node with the current peer read median
+    /// Initializes the read thermometer of a new node with the current peer read median (one-time cold start)
     pub fn seed_read_from_peers(&mut self, peer_median: u64) {
-        self.read_ring_buffer
-            .seed_with_floor(peer_median, HARD_FLOOR_READ_BASELINE_DAILY);
-    }
-
-    /// Fast re-seed for the read thermometer on network merge
-    pub fn fast_reseed_read_on_merge(&mut self, global_median: u64) {
-        self.read_ring_buffer.seed_with_floor(
-            global_median / READ_TO_WRITE_RATIO,
-            HARD_FLOOR_READ_BASELINE_DAILY,
-        );
+        if !self.read_initialized {
+            self.read_ring_buffer
+                .seed_with_floor(peer_median, HARD_FLOOR_READ_BASELINE_DAILY);
+            self.read_initialized = true;
+        }
     }
 
     /// Computes sync read credits based on the number of locks:
@@ -1463,17 +1497,17 @@ mod tests {
         therm.seed_read_from_peers(80_000);
         assert_eq!(therm.effective_read_ncb(), 80_000);
 
-        // fast_reseed_on_merge arithmetic & scaling
-        therm.fast_reseed_on_merge(2_500_000);
+        // fast_reseed_on_merge arithmetic & scaling (write only -> read derives via READ_TO_WRITE_RATIO)
+        therm.fast_reseed_on_merge(Some(2_500_000), None);
         assert_eq!(therm.effective_ncb(), 2_500_000);
         // read quota = 2_500_000 / 5 = 500_000 (which is > 50_000 floor)
         assert_eq!(therm.effective_read_ncb(), 500_000);
 
-        // fast_reseed_read_on_merge with value below floor
-        therm.fast_reseed_read_on_merge(100_000); // 100_000 / 5 = 20_000 < 50_000 floor -> 50_000
+        // fast_reseed_on_merge with read median below floor
+        therm.fast_reseed_on_merge(None, Some(20_000));
         assert_eq!(therm.effective_read_ncb(), HARD_FLOOR_READ_BASELINE_DAILY);
-        // fast_reseed_read_on_merge with value above floor (verifies / vs %)
-        therm.fast_reseed_read_on_merge(500_000); // 500_000 / 5 = 100_000 > 50_000 floor -> 100_000
+        // fast_reseed_on_merge with explicit read median above floor
+        therm.fast_reseed_on_merge(None, Some(100_000));
         assert_eq!(therm.effective_read_ncb(), 100_000);
 
         // calculate_daily_quota & calculate_daily_read_quota arithmetic

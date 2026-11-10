@@ -44,7 +44,7 @@ use crate::api::hmc::{
 };
 use crate::api::live::LiveDeadline;
 use crate::identity::NodeIdentity;
-use crate::ingress::{IngressError, PowEngine, TierController};
+use crate::ingress::{IngressError, PowEngine, StorageCharge, TierController};
 use crate::network::{PeerManager, QuicTransport};
 use crate::storage::{DualTierEngine, IngressOrigin, RedbStorage};
 
@@ -252,15 +252,14 @@ pub async fn live_deadline_middleware(
 }
 
 pub fn public_router(state: AppState) -> Router {
-    let sync_router = Router::new()
+    let large_body_router = Router::new()
         .route("/v1/sync", post(sync_locks))
+        .route("/v1/lock", post(submit_lock))
+        .route("/v1/lock/chain", post(submit_hmc_chain_lock))
         .layer(DefaultBodyLimit::max(1024 * 1024));
 
     Router::new()
-        .route("/v1/lock", post(submit_lock))
-        .route("/v1/lock/chain", post(submit_hmc_chain_lock))
         .route("/v1/status", post(query_status))
-        .merge(sync_router)
         .route("/v1/pow-challenge", get(get_pow_challenge))
         .route("/healthz", get(health_ok))
         .route("/v1/node-status", get(public_node_status))
@@ -277,6 +276,7 @@ pub fn public_router(state: AppState) -> Router {
         .route("/v1/gateways", get(public_gateways))
         .route("/v1/retained-choice/:tag", get(get_retained_choice))
         .layer(DefaultBodyLimit::max(64 * 1024))
+        .merge(large_body_router)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -810,10 +810,10 @@ pub async fn verify_peer_attestation(
     target_status: u8,
     network_id: humoco_sim_core::types::NetworkId,
     expected_tls_pubkey: Option<[u8; 32]>,
-) -> bool {
+) -> Result<bool, crate::error::NodeError> {
     let (expected_lock_id, expected_parent_lock) = expected_lock;
     if att.shard_id != shard_id {
-        return false;
+        return Ok(false);
     }
     // Strict 32-byte signer resolution.
     let pk = match att.node_pubkey_bytes() {
@@ -823,7 +823,7 @@ pub async fn verify_peer_attestation(
                 node_id = att.node_id,
                 "Dropped attestation: missing or invalid 32-byte NodePubKey"
             );
-            return false;
+            return Ok(false);
         }
     };
     // TLS binding: the attestation signer MUST be the peer we actually
@@ -834,7 +834,7 @@ pub async fn verify_peer_attestation(
                 node_id = att.node_id,
                 "Dropped attestation: signer NodePubKey does not match TLS certificate key of queried peer"
             );
-            return false;
+            return Ok(false);
         }
     }
     let vk = match peer_mgr.get_peer_verifying_key_by_node_id(&pk).await {
@@ -849,7 +849,7 @@ pub async fn verify_peer_attestation(
                         node_id = att.node_id,
                         "Dropped attestation: invalid 32-byte NodePubKey"
                     );
-                    return false;
+                    return Ok(false);
                 }
             }
         }
@@ -866,7 +866,7 @@ pub async fn verify_peer_attestation(
                 node_id = att.node_id,
                 "Dropped attestation: invalid signature length"
             );
-            return false;
+            return Ok(false);
         }
     };
     let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
@@ -882,7 +882,7 @@ pub async fn verify_peer_attestation(
                 node_id = att.node_id,
                 "Dropped attestation: invalid lock_id hex"
             );
-            return false;
+            return Ok(false);
         }
     };
 
@@ -891,7 +891,7 @@ pub async fn verify_peer_attestation(
             node_id = att.node_id,
             "Dropped attestation: lock_id mismatch"
         );
-        return false;
+        return Ok(false);
     }
 
     let att_parent_lock_bytes = match hex::decode(&att.parent_lock) {
@@ -905,12 +905,12 @@ pub async fn verify_peer_attestation(
                 node_id = att.node_id,
                 "Dropped attestation: invalid parent_lock hex"
             );
-            return false;
+            return Ok(false);
         }
     };
 
     if att_parent_lock_bytes != expected_parent_lock {
-        return false;
+        return Ok(false);
     }
 
     let domain_tag = if target_status == 1 {
@@ -940,27 +940,39 @@ pub async fn verify_peer_attestation(
             error = %e,
             "Dropped attestation: cryptographic signature verification failed"
         );
-        return false;
+        return Ok(false);
     }
 
-    // A10-02: Bounded original-vote observation for automatic ShardEquivocation detection.
+    // A10-02 / S06-12 / S06-13: Bounded original-vote observation for automatic ShardEquivocation detection.
     if let Some(signer_pk) = att.node_pubkey_bytes() {
         if let Some(core_att) = att.to_core() {
-            if peer_mgr
+            match peer_mgr
                 .observe_verified_original_attestation(signer_pk, core_att, network_id)
-                .is_some()
+                .await
             {
-                tracing::warn!(
-                    node_id = att.node_id,
-                    offender = %hex::encode(signer_pk),
-                    "Dropped attestation: detected conflicting original attestation (ShardEquivocation)! Perpetrator slashed."
-                );
-                return false;
+                Ok(Some(_proof)) => {
+                    tracing::warn!(
+                        node_id = att.node_id,
+                        offender = %hex::encode(signer_pk),
+                        "Dropped attestation: detected conflicting original attestation (ShardEquivocation)! Perpetrator slashed."
+                    );
+                    return Ok(false);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::error!(
+                        node_id = att.node_id,
+                        offender = %hex::encode(signer_pk),
+                        error = %err,
+                        "Storage persistence failure while observing peer attestation"
+                    );
+                    return Err(err);
+                }
             }
         }
     }
 
-    true
+    Ok(true)
 }
 
 /// Parameters for querying peer attestations via QUIC.
@@ -1380,18 +1392,28 @@ pub async fn collect_peer_attestations_with_local(
                                     .iter()
                                     .any(|s| s.node_pubkey_bytes() == Some(pk))
                             });
+                            let self_valid = match verify_peer_attestation(
+                                query.peer_mgr,
+                                &att,
+                                (query.lock_id, query.parent_lock),
+                                query.shard_id,
+                                query.target_status,
+                                query.network_id,
+                                Some(signer_ctx.self_pubkey),
+                            )
+                            .await {
+                                Ok(valid) => valid,
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "Local persistence error verifying self attestation"
+                                    );
+                                    false
+                                }
+                            };
                             if !is_duplicate
                                 && att.node_pubkey_bytes() == Some(signer_ctx.self_pubkey)
-                                && verify_peer_attestation(
-                                    query.peer_mgr,
-                                    &att,
-                                    (query.lock_id, query.parent_lock),
-                                    query.shard_id,
-                                    query.target_status,
-                                    query.network_id,
-                                    Some(signer_ctx.self_pubkey),
-                                )
-                                .await
+                                && self_valid
                             {
                                 collected_signatures.push(att);
                                 if collected_signatures.len() >= query.required_q {
@@ -1432,10 +1454,14 @@ pub async fn collect_peer_attestations_with_local(
                             .expected_members
                             .and_then(|members| members.get(rank_idx))
                             .copied();
-                        if expected_member
+                        let is_mismatch = expected_member
                             .map(|pk| Some(pk) != att.node_pubkey_bytes() || Some(pk) != tls_pubkey)
-                            .unwrap_or(false)
-                            || !verify_peer_attestation(
+                            .unwrap_or(false);
+
+                        let att_valid = if is_mismatch {
+                            false
+                        } else {
+                            let verify_res = verify_peer_attestation(
                                 query.peer_mgr,
                                 &att,
                                 (query.lock_id, query.parent_lock),
@@ -1444,8 +1470,28 @@ pub async fn collect_peer_attestations_with_local(
                                 query.network_id,
                                 tls_pubkey,
                             )
-                            .await
-                        {
+                            .await;
+                            match verify_res
+                            {
+                                Ok(valid) => valid,
+                                Err(err) => {
+                                    // Local persistence failure (S06-12 / S06-13): honest remote peer must NOT be penalized via record_failure.
+                                    tracing::error!(
+                                        error = %err,
+                                        "Local persistence error while verifying peer attestation; remote peer not penalized"
+                                    );
+                                    spawn_next(
+                                        &mut join_set,
+                                        &mut candidate_idx,
+                                        &mut total_queried,
+                                        &mut in_flight,
+                                    );
+                                    continue;
+                                }
+                            }
+                        };
+
+                        if !att_valid {
                             if rank_idx < 20 {
                                 query.peer_mgr.record_failure(addr).await;
                             }
@@ -1871,7 +1917,7 @@ pub async fn assemble_quorum_certificate_with_deadline_and_local(
                             .any(|s| s.node_pubkey_bytes() == Some(self_pubkey))
                     {
                         let verified = if let Some(pm) = &state.peer_manager {
-                            verify_peer_attestation(
+                            match verify_peer_attestation(
                                 pm,
                                 &att,
                                 (lock_id, parent_lock),
@@ -1880,7 +1926,16 @@ pub async fn assemble_quorum_certificate_with_deadline_and_local(
                                 state.network_id,
                                 Some(self_pubkey),
                             )
-                            .await
+                            .await {
+                                Ok(valid) => valid,
+                                Err(err) => {
+                                    tracing::error!(
+                                        error = %err,
+                                        "Local persistence error verifying attestation during QC assembly"
+                                    );
+                                    false
+                                }
+                            }
                         } else {
                             let domain_tag = if target_status == 1 {
                                 humoco_sim_core::crypto::domain_approve_final(state.network_id)
@@ -2346,6 +2401,14 @@ fn map_ingress_error(state: &AppState, err: IngressError, has_auth_token: bool) 
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Internal ingress error: {msg}"),
         ),
+        IngressError::InvalidLockCount(count) => (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid lock count: {count}"),
+        ),
+        IngressError::StorageChargeOverflow => (
+            StatusCode::BAD_REQUEST,
+            "Storage charge calculation overflow".into(),
+        ),
     };
 
     match &err {
@@ -2626,6 +2689,7 @@ async fn submit_hmc_lock_with_deadline(
 
     // # Architectural Invariant (Rule 9 / A09): Cheap-Checks-First
     let ttl_seconds = (root_valid_until.saturating_sub(now_ms)) / 1000;
+    let charge = StorageCharge::single(ttl_seconds);
 
     // A root retry is metadata idempotency, not a new PoW purchase or vote.
     // Await an exact durable acknowledgment even if its first commit is pending.
@@ -2670,7 +2734,7 @@ async fn submit_hmc_lock_with_deadline(
             peer_token,
             pow_challenge,
             pow_nonce,
-            ttl_seconds,
+            charge,
             parent_for_pow,
             Some(now_ms),
             is_retry,
@@ -2721,8 +2785,7 @@ async fn submit_hmc_lock_with_deadline(
         };
         let now_ms = state.net_time_ms();
         let sender_pubkey = *state.identity.node_pubkey();
-        let ttl_sec = (root_valid_until.saturating_sub(now_ms)) / 1000;
-        let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_sec);
+        let footprint = charge.micro_byte_years;
         let op_hash = entry.t_id;
         // Epoch-bound envelope (Phase 1 P0): reserve epoch first so the
         // signed digest and the wire payload commit to the same
@@ -2877,8 +2940,7 @@ async fn submit_hmc_lock_with_deadline(
         if let crate::ingress::IngressTier::Tier1Vip = ingress_tier {
             if let Some(token) = auth_token {
                 if let Ok(account_tag) = state.tier_controller.resolve_account_tag(token) {
-                    let required_byte_years =
-                        humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
+                    let required_byte_years = charge.byte_years;
                     let _ = state
                         .tier_controller
                         .topup_vip_quota(account_tag, required_byte_years);
@@ -2899,7 +2961,7 @@ async fn submit_hmc_lock_with_deadline(
         crate::ingress::IngressTier::Tier2F2F => "F2F",
         crate::ingress::IngressTier::Tier3Public => "Free",
     };
-    let byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
+    let byte_years = charge.byte_years;
 
     // Genesis is only a durable Root Anchor. No exclusion is inserted, no
     // original spend approval or quorum certificate may be minted for it.
@@ -2911,8 +2973,7 @@ async fn submit_hmc_lock_with_deadline(
     // 4. Ingress: Local shard storage vs. Stateless Gateway routing
     let (verdict, is_new, quorum_certificate) = if is_responsible {
         let sender_pubkey = *state.identity.node_pubkey();
-        let footprint =
-            humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
+        let footprint = charge.micro_byte_years;
         let op_hash = entry.t_id;
         let alloc = match tokio::time::timeout_at(
             checkout_deadline,
@@ -3080,7 +3141,7 @@ async fn submit_hmc_lock_with_deadline(
         // Stateless routing Gateway: DO NOT write to local engine or redb!
         // Instead, route and collect P2P shard attestations from the responsible shard nodes.
         let sender_pubkey = *state.identity.node_pubkey();
-        let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds);
+        let footprint = charge.micro_byte_years;
         let op_hash = entry.t_id;
         // Epoch-bound envelope (Phase 1 P0).
         let alloc = match tokio::time::timeout_at(
@@ -3240,6 +3301,20 @@ async fn submit_hmc_chain_lock_inner(
             .into_response();
     }
 
+    if chain_req.chain.len() > 256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "InvalidRequest".into(),
+                message: "Chain length exceeds maximum allowed of 256 locks".into(),
+                challenge: None,
+                difficulty: None,
+                expires_at: None,
+            }),
+        )
+            .into_response();
+    }
+
     if chain_req.chain.len() == 1 && chain_req.chain[0].is_genesis {
         if chain_req.chain[0].layer2_voucher_id != chain_req.layer2_voucher_id {
             return (
@@ -3308,24 +3383,19 @@ async fn submit_hmc_chain_lock_inner(
 
     let now_ms = state.net_time_ms();
 
-    if !has_credentials {
-        let err = match state
-            .tier_controller
-            .evaluate_and_charge_with_time(
-                None,
-                None,
-                None,
-                None,
-                0,
-                terminal_parent_for_pow,
-                Some(now_ms),
-            )
-            .await
-        {
-            Err(e) => e,
-            Ok(_) => IngressError::InvalidAuthToken,
-        };
-        return map_ingress_error(&state, err, false);
+    if !has_credentials && state.pow_engine.default_difficulty() > 0 {
+        let (challenge, difficulty, expires_at) = state
+            .pow_engine
+            .generate_challenge_for_parent(terminal_parent_for_pow.unwrap_or(&[0u8; 32]));
+        return map_ingress_error(
+            &state,
+            IngressError::PoWRequired {
+                challenge,
+                difficulty,
+                expires_at,
+            },
+            false,
+        );
     }
 
     // Verify PoW in RAM before any disk lookup (A25-04 / A25-R3 / Rule 9)
@@ -3408,6 +3478,10 @@ async fn submit_hmc_chain_lock_inner(
             .into_response();
     };
     let ttl_seconds = root_valid_until.saturating_sub(now_ms) / 1000;
+    let charge = match StorageCharge::derive(ttl_seconds, chain_req.chain.len()) {
+        Ok(c) => c,
+        Err(err) => return map_ingress_error(&state, err, auth_token.is_some()),
+    };
 
     let shard_id = if first_hop.is_genesis {
         let parent = humoco_sim_core::types::genesis_parent_bytes_from_tag(
@@ -3459,7 +3533,7 @@ async fn submit_hmc_chain_lock_inner(
         false
     };
 
-    // 3-Tier Access Evaluation (single charge for whole batch, bound to terminal parent: A25-R2)
+    // 3-Tier Access Evaluation (aggregate charge for all locks in chain)
     let ingress_tier = match state
         .tier_controller
         .evaluate_and_charge_with_time_and_retry(
@@ -3467,7 +3541,7 @@ async fn submit_hmc_chain_lock_inner(
             peer_token,
             pow_challenge,
             pow_nonce,
-            ttl_seconds,
+            charge,
             terminal_parent_for_pow,
             Some(now_ms),
             is_chain_retry,
@@ -3485,7 +3559,7 @@ async fn submit_hmc_chain_lock_inner(
         crate::ingress::IngressTier::Tier2F2F => "F2F",
         crate::ingress::IngressTier::Tier3Public => "Free",
     };
-    let byte_years = humoco_sim_core::quota::ByteYears::from_ttl_seconds(ttl_seconds);
+    let byte_years = charge.byte_years;
 
     let last_hop = match chain_req.chain.last() {
         Some(h) => h,
@@ -3515,9 +3589,7 @@ async fn submit_hmc_chain_lock_inner(
 
     let (verdict, is_new, quorum_certificate) = if is_responsible {
         let sender_pubkey = *state.identity.node_pubkey();
-        let footprint =
-            humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds)
-                .saturating_mul(chain_req.chain.len() as u64);
+        let footprint = charge.micro_byte_years;
         let op_hash = last_hop_entry.t_id;
         let alloc = match tokio::time::timeout_at(
             checkout_deadline,
@@ -3686,8 +3758,7 @@ async fn submit_hmc_chain_lock_inner(
         // Stateless Gateway: do not write to local engine/redb
         let entry = L2LockEntry::from(last_hop);
         let sender_pubkey = *state.identity.node_pubkey();
-        let footprint = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_seconds)
-            .saturating_mul(chain_req.chain.len() as u64);
+        let footprint = charge.micro_byte_years;
         let op_hash = entry.t_id;
         // Epoch-bound envelope (Phase 1 P0).
         let alloc = match tokio::time::timeout_at(

@@ -88,6 +88,52 @@ pub enum IngressError {
 
     #[error("Internal ingress error: {0}")]
     Internal(String),
+
+    #[error("Invalid lock count: {0}")]
+    InvalidLockCount(usize),
+
+    #[error("Storage charge calculation overflow")]
+    StorageChargeOverflow,
+}
+
+/// Canonical storage charge for single or batched lock admissions (Spec 09 Section 1.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageCharge {
+    pub byte_years: u64,
+    pub micro_byte_years: u64,
+}
+
+impl StorageCharge {
+    pub const ZERO: Self = Self {
+        byte_years: 0,
+        micro_byte_years: 0,
+    };
+
+    pub fn single(ttl_seconds: u64) -> Self {
+        Self {
+            byte_years: ByteYears::from_ttl_seconds(ttl_seconds),
+            micro_byte_years: ByteYears::micro_from_ttl_seconds(ttl_seconds),
+        }
+    }
+
+    pub fn derive(ttl_seconds: u64, lock_count: usize) -> Result<Self, IngressError> {
+        if lock_count == 0 {
+            return Err(IngressError::InvalidLockCount(0));
+        }
+        let count_u64 = u64::try_from(lock_count).map_err(|_| IngressError::StorageChargeOverflow)?;
+        let per_lock_by = ByteYears::from_ttl_seconds(ttl_seconds);
+        let per_lock_micro = ByteYears::micro_from_ttl_seconds(ttl_seconds);
+        let byte_years = per_lock_by
+            .checked_mul(count_u64)
+            .ok_or(IngressError::StorageChargeOverflow)?;
+        let micro_byte_years = per_lock_micro
+            .checked_mul(count_u64)
+            .ok_or(IngressError::StorageChargeOverflow)?;
+        Ok(Self {
+            byte_years,
+            micro_byte_years,
+        })
+    }
 }
 
 /// FIFO-sequenced VIP quota persist operation.
@@ -965,11 +1011,41 @@ impl TierController {
 
     /// [INV-0908]
     /// Fast re-seed on network merges (e.g., village A docks into the global mesh)
-    pub fn fast_reseed_on_merge(&self, global_median: u64) {
+    /// Initializes the read thermometer of a new node with the current peer read median (one-time cold start)
+    pub fn seed_read_from_peers(&self, peer_median: u64) {
         self.thermometer
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .fast_reseed_on_merge(global_median);
+            .seed_read_from_peers(peer_median);
+    }
+
+    /// Whether the 28-day write history buffer has completed cold-start initialization
+    pub fn is_write_initialized(&self) -> bool {
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_write_initialized()
+    }
+
+    /// Whether the 28-day read history buffer has completed cold-start initialization
+    pub fn is_read_initialized(&self) -> bool {
+        self.thermometer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_read_initialized()
+    }
+
+    /// [INV-0908]
+    /// Fast re-seed on network merges (e.g., village A docks onto the global mesh)
+    pub fn fast_reseed_on_merge(
+        &self,
+        write_median: Option<u64>,
+        read_median: Option<u64>,
+    ) {
+        self.thermometer
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .fast_reseed_on_merge(write_median, read_median);
     }
 
     /// [INV-0922] Records a daily median in the 28-day slotted ring buffer
@@ -1436,7 +1512,7 @@ impl TierController {
         peer_token: Option<&str>,
         pow_challenge: Option<&str>,
         pow_nonce: Option<u64>,
-        ttl_seconds: u64,
+        charge: StorageCharge,
         parent_lock: Option<&[u8; 32]>,
     ) -> Result<IngressTier, IngressError> {
         self.evaluate_and_charge_with_time(
@@ -1444,7 +1520,7 @@ impl TierController {
             peer_token,
             pow_challenge,
             pow_nonce,
-            ttl_seconds,
+            charge,
             parent_lock,
             None,
         )
@@ -1459,7 +1535,7 @@ impl TierController {
         peer_token: Option<&str>,
         pow_challenge: Option<&str>,
         pow_nonce: Option<u64>,
-        ttl_seconds: u64,
+        charge: StorageCharge,
         parent_lock: Option<&[u8; 32]>,
         now_ms: Option<u64>,
     ) -> Result<IngressTier, IngressError> {
@@ -1468,7 +1544,7 @@ impl TierController {
             peer_token,
             pow_challenge,
             pow_nonce,
-            ttl_seconds,
+            charge,
             parent_lock,
             now_ms,
             false,
@@ -1486,14 +1562,14 @@ impl TierController {
         peer_token: Option<&str>,
         pow_challenge: Option<&str>,
         pow_nonce: Option<u64>,
-        ttl_seconds: u64,
+        charge: StorageCharge,
         parent_lock: Option<&[u8; 32]>,
         now_ms: Option<u64>,
         is_retry: bool,
     ) -> Result<IngressTier, IngressError> {
         let eff_now_ms = self.effective_now_ms(now_ms);
         let now_sec = eff_now_ms / 1000;
-        let footprint_micro_bj = ByteYears::micro_from_ttl_seconds(ttl_seconds);
+        let footprint_micro_bj = charge.micro_byte_years;
 
         // 1. Check Tier 1 (VIP) - in-memory atomic cache, no synchronous fsync stall (INV-0929 hot-path)
         if let Some(token) = auth_token {
@@ -1510,7 +1586,7 @@ impl TierController {
             // Hydrate cold miss asynchronously before acquiring write lock (A05-01)
             self.ensure_vip_quota_cached(&account_tag).await?;
 
-            let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
+            let required_byte_years = charge.byte_years;
             let daily_quota = self.calculate_daily_quota(5.0, 1.0);
 
             // 1. Check daily rolling quota using candidate counter
@@ -1591,7 +1667,7 @@ impl TierController {
                 return Ok(IngressTier::Tier2F2F);
             }
 
-            let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
+            let required_byte_years = charge.byte_years;
             self.evaluate_f2f_quota(token_trimmed, required_byte_years, eff_now_ms)?;
             self.f2f_writes_today.fetch_add(1, Ordering::Relaxed);
             self.thermometer
@@ -1604,7 +1680,7 @@ impl TierController {
 
         // 3. Check Tier 3 (Public - BLAKE3 PoW)
         // Fix S05-06: Shared O(1) RollingQuotaCounter for the entire anonymous pool - zero parent_lock hashmap!
-        let required_byte_years = ByteYears::from_ttl_seconds(ttl_seconds);
+        let required_byte_years = charge.byte_years;
         let daily_quota = self.calculate_daily_quota(1.0, 1.0);
         let p = parent_lock.copied().unwrap_or([0u8; 32]);
 
@@ -1850,7 +1926,15 @@ mod tests {
 
         // Perform an authenticated F2F write
         let tier = controller
-            .evaluate_and_charge_with_time(None, Some(token), None, None, 60, None, Some(now_ms))
+            .evaluate_and_charge_with_time(
+                None,
+                Some(token),
+                None,
+                None,
+                StorageCharge::single(60),
+                None,
+                Some(now_ms),
+            )
             .await
             .expect("F2F write allowed");
         assert_eq!(tier, IngressTier::Tier2F2F);

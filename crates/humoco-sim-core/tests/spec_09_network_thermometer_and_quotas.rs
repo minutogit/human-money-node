@@ -443,7 +443,7 @@ fn test_spec_09_merge_fast_reseed_and_scale_jump() {
 
     // Merge-Ereignis: Dorf dockt an Weltnetz an (Globaler Median: 100.000.000 Byte-Jahre)
     let global_world_median = 100_000_000;
-    village_node_thermometer.fast_reseed_on_merge(global_world_median);
+    village_node_thermometer.fast_reseed_on_merge(Some(global_world_median), None);
 
     // Verifiziere: Der Dorfknoten schwingt in < 1ms auf die Welt-Skala ein (kein 28-Tage-Verzug)
     assert_eq!(village_node_thermometer.effective_ncb(), 100_000_000);

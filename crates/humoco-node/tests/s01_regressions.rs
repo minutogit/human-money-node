@@ -414,7 +414,7 @@ async fn test_s01_10_vip_chain_retry_storage_not_recharged() {
     // Calculate required Byte-Years for chain_initial (2 hops)
     let root_valid_until = now + 600_000;
     let ttl_seconds = root_valid_until.saturating_sub(now) / 1000;
-    let required_bj = ByteYears::from_ttl_seconds(ttl_seconds);
+    let required_bj = ByteYears::from_ttl_seconds(ttl_seconds) * 2;
 
     // Top up VIP quota with EXACTLY required_bj (sufficient for exactly one chain write)
     tiers.topup_vip_quota(account_tag, required_bj).unwrap();
@@ -1698,7 +1698,8 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
             state.network_id,
             Some(*gateway_id.node_pubkey()),
         )
-        .await,
+        .await
+        .unwrap(),
         "Valid attestation must pass verification"
     );
 
@@ -1715,7 +1716,8 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
             state.network_id,
             Some(*gateway_id.node_pubkey()),
         )
-        .await,
+        .await
+        .unwrap(),
         "Attestation verified with mismatched lock_id must be rejected"
     );
 
@@ -1732,7 +1734,8 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
             state.network_id,
             Some(*gateway_id.node_pubkey()),
         )
-        .await,
+        .await
+        .unwrap(),
         "Attestation verified with mismatched parent_lock must be rejected"
     );
 
@@ -1747,7 +1750,8 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
             state.network_id,
             Some(*gateway_id.node_pubkey()),
         )
-        .await,
+        .await
+        .unwrap(),
         "Attestation verified with mismatched shard_id must be rejected"
     );
 
@@ -1762,7 +1766,8 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
             state.network_id,
             Some(*gateway_id.node_pubkey()),
         )
-        .await,
+        .await
+        .unwrap(),
         "Attestation verified with mismatched target_status must be rejected"
     );
 
@@ -1778,7 +1783,8 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
             wrong_net_id,
             Some(*gateway_id.node_pubkey()),
         )
-        .await,
+        .await
+        .unwrap(),
         "Attestation verified with mismatched network_id must be rejected"
     );
 
@@ -1794,7 +1800,8 @@ async fn test_s01_12_frozen_committee_and_strict_approval_context_validation() {
             state.network_id,
             Some(wrong_tls_pubkey),
         )
-        .await,
+        .await
+        .unwrap(),
         "Attestation verified with mismatched TLS pubkey must be rejected"
     );
 

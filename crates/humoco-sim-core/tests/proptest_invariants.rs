@@ -161,7 +161,7 @@ proptest! {
         prop_assert!(thermometer.effective_read_ncb() >= HARD_FLOOR_READ_BASELINE_DAILY);
 
         // Fast reseed on merge
-        thermometer.fast_reseed_on_merge(global_median);
+        thermometer.fast_reseed_on_merge(Some(global_median), None);
         prop_assert!(
             thermometer.effective_ncb() >= HARD_FLOOR_BASELINE_DAILY,
             "effective_ncb must be >= HARD_FLOOR_BASELINE_DAILY"
@@ -172,7 +172,7 @@ proptest! {
         );
 
         // Explicit read reseed
-        thermometer.fast_reseed_read_on_merge(global_median);
+        thermometer.fast_reseed_on_merge(None, Some(global_median));
         prop_assert!(
             thermometer.effective_read_ncb() >= HARD_FLOOR_READ_BASELINE_DAILY,
             "effective_read_ncb must be >= HARD_FLOOR_READ_BASELINE_DAILY after read reseed"
@@ -192,7 +192,7 @@ proptest! {
         damper2 in 0.0f64..=1.5f64,
     ) {
         let mut thermometer = NetworkThermometer::new();
-        thermometer.fast_reseed_on_merge(global_median);
+        thermometer.fast_reseed_on_merge(Some(global_median), None);
 
         let (k_low, k_high) = if k1 <= k2 { (k1, k2) } else { (k2, k1) };
         let (d_low, d_high) = if damper1 <= damper2 { (damper1, damper2) } else { (damper2, damper1) };
@@ -218,7 +218,7 @@ proptest! {
         // Monotonicity with respect to higher network median
         let mut higher_thermometer = NetworkThermometer::new();
         let higher_median = global_median.saturating_add(5_000_000);
-        higher_thermometer.fast_reseed_on_merge(higher_median);
+        higher_thermometer.fast_reseed_on_merge(Some(higher_median), None);
 
         prop_assert!(
             thermometer.calculate_daily_quota(k_high, d_high)

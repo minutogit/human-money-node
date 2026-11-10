@@ -29,7 +29,7 @@ use humoco_node::{
             MAX_AUTH_FAILURES_PER_WINDOW, MAX_TRACKED_AUTH_IPS,
         },
         build_router,
-        hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockRequest},
+        hmc::{calculate_l2_payload_hash, L2AuthPayload, L2ChainLockRequest, L2LockEntry, L2LockRequest, L2Verdict},
         routes::build_operator_router,
         AppState,
     },
@@ -40,7 +40,7 @@ use humoco_node::{
     ingress::{
         pow::{self, count_leading_zero_bits, hash_work, PowError},
         tier::is_valid_client_token,
-        IngressError, IngressTier, PowEngine, TierController,
+        IngressError, IngressTier, PowEngine, StorageCharge, TierController,
     },
     network::{
         framing::{HeartbeatWirePayload, LockWirePayload}, DefaultRequestHandler, NodeRequestHandler, PeerManager,
@@ -52,6 +52,7 @@ use humoco_sim_core::{
     fraud::{compute_ingress_envelope_digest, FraudProofPayload, IngressEnvelopeEvidence},
     wire::{MsgType, WireHeader, FLAG_QUOTA_EXCEEDED},
 };
+use sha3::Digest;
 
 fn test_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -74,6 +75,37 @@ fn authenticate_root_fixture(req: &mut L2LockRequest, key: &SigningKey) {
         state_hash: req.transaction_hash,
         sender_pubkey: req.sender_ephemeral_pub,
         receiver_pubkey_hash: None,
+        change_pubkey_hash: None,
+        root_valid_until_ms: req.deletable_at.as_ref().unwrap().parse().unwrap(),
+        is_root: true,
+        signature: [0; 64],
+    };
+    proof.signature = key.sign(&proof.digest().unwrap()).to_bytes();
+    req.causal_output = Some(proof);
+    req.layer2_signature = key.sign(&calculate_l2_payload_hash(req)).to_bytes();
+}
+
+fn authenticate_root_fixture_with_receiver(
+    req: &mut L2LockRequest,
+    key: &SigningKey,
+    receiver_pubkey_hash: Option<[u8; 32]>,
+) {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(req.transaction_hash);
+    hash.update(req.sender_ephemeral_pub);
+    if let Some(receiver) = receiver_pubkey_hash {
+        hash.update(receiver);
+    }
+    hash.update(req.deletable_at.as_deref().unwrap().as_bytes());
+    req.layer2_voucher_id = hex::encode(hash.finalize());
+    let mut proof = humoco_proto::causal::CausalOutputProof {
+        version: 1,
+        voucher_id: req.layer2_voucher_id.clone(),
+        transaction_id: req.transaction_hash,
+        state_hash: req.transaction_hash,
+        sender_pubkey: req.sender_ephemeral_pub,
+        receiver_pubkey_hash,
         change_pubkey_hash: None,
         root_valid_until_ms: req.deletable_at.as_ref().unwrap().parse().unwrap(),
         is_root: true,
@@ -147,6 +179,111 @@ fn make_test_hmc_spend(
     let payload_hash = calculate_l2_payload_hash(&req);
     req.layer2_signature = sender_key.sign(&payload_hash).to_bytes();
     req
+}
+
+fn make_test_causal_spend(
+    previous: &L2LockRequest,
+    sender_key: &SigningKey,
+    next_receiver_hash: Option<[u8; 32]>,
+    tx_hash: [u8; 32],
+    created_at_ms: u64,
+) -> L2LockRequest {
+    use sha3::{Digest as _, Sha3_256};
+    let proof = previous.causal_output.as_ref().unwrap();
+    let mut hash = Sha3_256::new();
+    hash.update(32u32.to_le_bytes());
+    hash.update(proof.state_hash);
+    hash.update(32u32.to_le_bytes());
+    hash.update(sender_key.verifying_key().as_bytes());
+    let ds_tag = bs58::encode(hash.finalize()).into_string();
+
+    let sender_pub = sender_key.verifying_key().to_bytes();
+    let mut req = L2LockRequest {
+        causal_output: None,
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: previous.layer2_voucher_id.clone(),
+        ds_tag: Some(ds_tag),
+        transaction_hash: tx_hash,
+        is_genesis: false,
+        sender_ephemeral_pub: sender_pub,
+        layer2_signature: [0u8; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        created_at_ms,
+        deletable_at: None,
+        privacy_guard: None,
+    };
+    let mut output_proof = humoco_proto::causal::CausalOutputProof {
+        version: 1,
+        voucher_id: req.layer2_voucher_id.clone(),
+        transaction_id: req.transaction_hash,
+        state_hash: req.transaction_hash,
+        sender_pubkey: req.sender_ephemeral_pub,
+        receiver_pubkey_hash: next_receiver_hash,
+        change_pubkey_hash: None,
+        root_valid_until_ms: proof.root_valid_until_ms,
+        is_root: false,
+        signature: [0; 64],
+    };
+    output_proof.signature = sender_key.sign(&output_proof.digest().unwrap()).to_bytes();
+    req.causal_output = Some(output_proof);
+    req.layer2_signature = sender_key.sign(&calculate_l2_payload_hash(&req)).to_bytes();
+    req
+}
+
+#[allow(clippy::type_complexity)]
+fn setup_test_app_with_clock() -> (
+    axum::Router,
+    axum::Router,
+    Arc<RedbStorage>,
+    NodeIdentity,
+    Arc<TierController>,
+    Arc<PowEngine>,
+    AppState,
+    Arc<PeerManager>,
+) {
+    let temp = tempdir().expect("tempdir");
+    let db_path = temp.path().join("test_s05_18_clock.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).expect("open redb"));
+    let (engine, _flush_handle) = DualTierEngine::new(storage.clone());
+    let identity = NodeIdentity::generate();
+    let pm = Arc::new(PeerManager::new(vec![]));
+    pm.set_simulation_mode(true);
+    pm.seed_local_ticket_age(
+        *identity.node_pubkey(),
+        *identity.hrw_routing_id(),
+        std::time::Duration::from_secs(86_400),
+    );
+    let pow_engine = Arc::new(PowEngine::new(0).with_clock(pm.clock().clone()));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow_engine.clone()));
+
+    let state = AppState::new(
+        engine,
+        storage.clone(),
+        identity.clone(),
+        tier_controller.clone(),
+        pow_engine.clone(),
+    )
+    .with_peer_manager(pm.clone());
+    for shard in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(shard);
+    }
+    let operator = build_operator_router(state.clone());
+    let router = build_router(state.clone());
+    (
+        router,
+        operator,
+        storage,
+        identity,
+        tier_controller,
+        pow_engine,
+        state,
+        pm,
+    )
 }
 
 fn setup_test_app_pair() -> (
@@ -779,7 +916,7 @@ async fn test_s05_03_vip_daily_allowance_enforcement_without_credit_burn() {
             None,
             None,
             None,
-            31_536_000, // 1 year = 192 BY
+            StorageCharge::single(31_536_000), // 1 year = 192 BY
             None,
             Some(now_ms),
         )
@@ -843,7 +980,7 @@ async fn test_s05_03_vip_daily_allowance_enforcement_without_credit_burn() {
             None,
             None,
             None,
-            31_536_000,
+            StorageCharge::single(31_536_000),
             None,
             Some(now_ms),
             true, // is_retry = true
@@ -868,7 +1005,7 @@ async fn test_s05_03_vip_daily_allowance_enforcement_without_credit_burn() {
             None,
             None,
             None,
-            31_536_000,
+            StorageCharge::single(31_536_000),
             None,
             Some(next_day_ms),
         )
@@ -920,7 +1057,7 @@ async fn test_s05_03_vip_persistence_channel_full_leaves_state_untouched() {
             None,
             None,
             None,
-            31_536_000,
+            StorageCharge::single(31_536_000),
             None,
             Some(now_ms),
         )
@@ -961,7 +1098,7 @@ async fn test_s05_03_vip_persistence_channel_full_leaves_state_untouched() {
             None,
             None,
             None,
-            31_536_000,
+            StorageCharge::single(31_536_000),
             None,
             Some(now_ms),
         )
@@ -1020,7 +1157,7 @@ async fn test_s05_03_concurrent_vip_allowance_contention() {
                 None,
                 None,
                 None,
-                31_536_000,
+                StorageCharge::single(31_536_000),
                 None,
                 Some(now_ms),
             )
@@ -1115,7 +1252,7 @@ async fn test_s05_04_full_32byte_client_accounting_and_tier_isolation() {
             Some(token_2),
             None,
             None,
-            31_536_000,
+            StorageCharge::single(31_536_000),
             None,
             Some(now_ms),
         )
@@ -1498,7 +1635,7 @@ async fn test_s05_06_public_tier3_shared_rolling_budget_and_constant_memory() {
             None,
             None,
             None,
-            ttl_full,
+            StorageCharge::single(ttl_full),
             Some(&parent_1),
             Some(now_ms),
         )
@@ -1518,7 +1655,7 @@ async fn test_s05_06_public_tier3_shared_rolling_budget_and_constant_memory() {
             None,
             None,
             None,
-            ttl_extra,
+            StorageCharge::single(ttl_extra),
             Some(&parent_2),
             Some(now_ms),
         )
@@ -1536,7 +1673,7 @@ async fn test_s05_06_public_tier3_shared_rolling_budget_and_constant_memory() {
             None,
             None,
             None,
-            ttl_extra,
+            StorageCharge::single(ttl_extra),
             Some(&parent_3),
             Some(now_ms),
         )
@@ -1617,7 +1754,7 @@ async fn test_s05_07_consensus_time_propagation_for_pow_and_tiers() {
             None,
             Some(&net_challenge_hex),
             Some(net_nonce),
-            60,
+            StorageCharge::single(60),
             Some(&parent),
             None,
         )
@@ -1636,7 +1773,7 @@ async fn test_s05_07_consensus_time_propagation_for_pow_and_tiers() {
                 None,
                 Some(&os_challenge_hex),
                 Some(0),
-                60,
+                StorageCharge::single(60),
                 Some(&parent),
                 None,
             )
@@ -1664,7 +1801,7 @@ async fn test_s05_07_consensus_time_propagation_for_pow_and_tiers() {
             None,
             Some(&explicit_challenge_hex),
             Some(explicit_nonce),
-            60,
+            StorageCharge::single(60),
             Some(&parent),
             Some(explicit_now_ms),
         )
@@ -1682,7 +1819,7 @@ async fn test_s05_07_consensus_time_propagation_for_pow_and_tiers() {
             None,
             Some(&net_challenge_hex),
             Some(net_nonce),
-            60,
+            StorageCharge::single(60),
             Some(&parent),
             Some(explicit_now_ms),
         )
@@ -1880,7 +2017,7 @@ async fn test_s05_09_rolling_ema_quota_exact_limit_retry_vip_latch_and_quic_node
             None,
             None,
             None,
-            31_536_000,
+            StorageCharge::single(31_536_000),
             None,
             Some(t0_ms),
             true,
@@ -1894,7 +2031,7 @@ async fn test_s05_09_rolling_ema_quota_exact_limit_retry_vip_latch_and_quic_node
             Some(f2f_token),
             None,
             None,
-            31_536_000,
+            StorageCharge::single(31_536_000),
             None,
             Some(t0_ms),
             true,
@@ -1927,7 +2064,7 @@ async fn test_s05_09_rolling_ema_quota_exact_limit_retry_vip_latch_and_quic_node
             None,
             None,
             None,
-            60,
+            StorageCharge::single(60),
             None,
             Some(t0_ms),
         )
@@ -2524,7 +2661,7 @@ async fn test_s05_11_real_quic_restart_regression() {
                     None,
                     None,
                     None,
-                    humoco_sim_core::quota::SECONDS_PER_YEAR,
+                    StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
                     Some(&[0x11; 32]),
                     Some(now_ms_1),
                     false,
@@ -2633,7 +2770,7 @@ async fn test_s05_11_real_quic_restart_regression() {
                 None,
                 None,
                 None,
-                humoco_sim_core::quota::SECONDS_PER_YEAR,
+                StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
                 Some(&[0x22; 32]),
                 Some(now_ms_2),
                 false,
@@ -3267,7 +3404,7 @@ async fn test_s05_13_fractional_vip_boundary_sequence() {
                 None,
                 None,
                 None,
-                60,
+                StorageCharge::single(60),
                 None,
                 Some(t1_ms),
             )
@@ -3331,7 +3468,7 @@ async fn test_s05_13_transactional_atomicity_insufficient_credit_and_capacity() 
                 None,
                 None,
                 None,
-                60, // requires 1 Byte-Year
+                StorageCharge::single(60), // requires 1 Byte-Year
                 None,
                 Some(t_ms),
             )
@@ -3389,7 +3526,7 @@ async fn test_s05_13_transactional_atomicity_insufficient_credit_and_capacity() 
                 None,
                 None,
                 None,
-                60,
+                StorageCharge::single(60),
                 None,
                 Some(t_ms),
             )
@@ -3820,7 +3957,7 @@ async fn test_s05_14_real_quic_gateway_restart_without_pre_restart_accounting_dr
                     None,
                     None,
                     None,
-                    humoco_sim_core::quota::SECONDS_PER_YEAR,
+                    StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
                     Some(&[0x33; 32]),
                     Some(now_ms_1),
                     false,
@@ -3932,7 +4069,7 @@ async fn test_s05_14_real_quic_gateway_restart_without_pre_restart_accounting_dr
                 None,
                 None,
                 None,
-                humoco_sim_core::quota::SECONDS_PER_YEAR,
+                StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
                 Some(&[0x44; 32]),
                 Some(now_ms_2),
                 false,
@@ -4376,7 +4513,7 @@ async fn test_s05_15_write_ema_restart_continuity() {
                 None,
                 None,
                 None,
-                humoco_sim_core::quota::SECONDS_PER_YEAR,
+                StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
                 Some(&[0x11; 32]),
                 Some(t1),
                 false,
@@ -4402,7 +4539,7 @@ async fn test_s05_15_write_ema_restart_continuity() {
         None,
         None,
         None,
-        humoco_sim_core::quota::SECONDS_PER_YEAR,
+        StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
         Some(&[0x22; 32]),
         Some(t2),
         false,
@@ -4625,7 +4762,7 @@ async fn test_s05_15_interruption_without_graceful_drain_write_and_read() {
                 None,
                 None,
                 None,
-                humoco_sim_core::quota::SECONDS_PER_YEAR,
+                StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
                 Some(&[0x55; 32]),
                 Some(t1),
                 false,
@@ -4687,7 +4824,7 @@ async fn test_s05_15_fractional_precision_and_decay_continuity() {
             None,
             None,
             None,
-            humoco_sim_core::quota::SECONDS_PER_YEAR,
+            StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
             Some(&[0x66; 32]),
             Some(t1),
             false,
@@ -4732,7 +4869,7 @@ async fn test_s05_15_calendar_day_rollover_continuous_ema() {
             None,
             None,
             None,
-            humoco_sim_core::quota::SECONDS_PER_YEAR * 5,
+            StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR * 5),
             Some(&[0x77; 32]),
             Some(t1),
             false,
@@ -4853,7 +4990,7 @@ async fn test_s05_15_real_quic_write_and_read_restart_continuity() {
                     None,
                     None,
                     None,
-                    humoco_sim_core::quota::SECONDS_PER_YEAR,
+                    StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
                     Some(&[0x11; 32]),
                     Some(now_ms_1),
                     false,
@@ -4947,7 +5084,7 @@ async fn test_s05_15_real_quic_write_and_read_restart_continuity() {
                 None,
                 None,
                 None,
-                humoco_sim_core::quota::SECONDS_PER_YEAR,
+                StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
                 Some(&[0x22; 32]),
                 Some(now_ms_2),
                 false,
@@ -5280,7 +5417,7 @@ async fn test_s05_17_genesis_registration_and_rejected_admission_durable_ema() {
         None,
         None,
         None,
-        humoco_sim_core::quota::SECONDS_PER_YEAR,
+        StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
         Some(&[0x93; 32]),
         Some(now_ms),
         false,
@@ -5331,7 +5468,7 @@ async fn test_s05_17_ema_only_snapshot_drain_and_decay_ordering() {
             None,
             None,
             None,
-            humoco_sim_core::quota::SECONDS_PER_YEAR,
+            StorageCharge::single(humoco_sim_core::quota::SECONDS_PER_YEAR),
             Some(&[0x44; 32]),
             Some(t1),
             false,
@@ -5467,7 +5604,7 @@ async fn test_s05_17_real_quic_direct_friend_heartbeat_continuity() {
         None,
         None,
         None,
-        31_536_000,
+        StorageCharge::single(31_536_000),
         Some(&[0x77; 32]),
         Some(now_ms),
         false,
@@ -5903,6 +6040,859 @@ async fn test_s05_17_full_daemon_lifecycle_genesis_heartbeat_restart_continuity(
     let res2 = daemon2_handle.await.expect("join daemon2");
     assert!(res2.is_ok(), "daemon2 shutdown must complete cleanly, got {:?}", res2);
 }
+
+// ===========================================================================
+// S05-18: Multi-lock chain aggregate storage charge and bounded accounting
+// ===========================================================================
+
+#[tokio::test]
+async fn test_s05_18_vip_multi_lock_chain_aggregate_accounting() {
+    let (router, _operator, storage, _identity, tier_controller, _pow, state, peer_manager) =
+        setup_test_app_with_clock();
+
+    let now_ms = peer_manager.net_time_ms();
+    let now_sec = now_ms / 1000;
+
+    // Anchor a root with ~1 year remaining:
+    // ttl_seconds = 31_535_999s -> ByteYears = 192, micro_ByteYears = 191_999_994
+    let ttl_seconds = 31_535_999u64;
+    let root_valid_until = now_ms + ttl_seconds * 1000 + 500;
+
+    let key0 = SigningKey::from_bytes(&[50; 32]);
+    let key1 = SigningKey::from_bytes(&[51; 32]);
+    let key2 = SigningKey::from_bytes(&[52; 32]);
+    let key3 = SigningKey::from_bytes(&[53; 32]);
+
+    let r1 = sha3::Sha3_256::digest(key1.verifying_key().as_bytes()).into();
+    let mut root = make_test_hmc_genesis([0x50; 32], root_valid_until, &key0);
+    authenticate_root_fixture_with_receiver(&mut root, &key0, Some(r1));
+
+    // Separately anchor the root
+    let root_tag = bs58::encode(root.transaction_hash).into_string();
+    let (root_verdict, is_new) = state
+        .engine
+        .ingress_hmc_lock_durable(
+            root_tag.clone(),
+            L2LockEntry::from(&root),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(now_ms),
+            Some("Free"),
+            Some(0),
+            None,
+        )
+        .await;
+    assert!(matches!(root_verdict, L2Verdict::Verified { .. }));
+    assert!(is_new);
+
+    // Build 2 valid new spends
+    let r2 = sha3::Sha3_256::digest(key2.verifying_key().as_bytes()).into();
+    let spend1 = make_test_causal_spend(&root, &key1, Some(r2), [0x51; 32], now_ms);
+
+    let r3 = sha3::Sha3_256::digest(key3.verifying_key().as_bytes()).into();
+    let spend2 = make_test_causal_spend(&spend1, &key2, Some(r3), [0x52; 32], now_ms);
+
+    let chain_req = L2ChainLockRequest {
+        auth: spend2.auth.clone(),
+        layer2_voucher_id: root.layer2_voucher_id.clone(),
+        chain: vec![spend1.clone(), spend2.clone()],
+    };
+    let chain_bytes = serde_json::to_vec(&chain_req).unwrap();
+
+    let account_tag = [0x77u8; 32];
+    let vip_token = format!("vip_{}", hex::encode(account_tag));
+    tier_controller.register_vip_token(&vip_token, account_tag);
+
+    // Scenario A: With one lock's VIP credit (192 Byte-Years)
+    tier_controller.topup_vip_quota(account_tag, 192).unwrap();
+    assert_eq!(tier_controller.get_cached_vip_quota(&account_tag), Some(192));
+
+    let http_req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("authorization", format!("Bearer {vip_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(chain_bytes.clone()))
+        .unwrap();
+
+    let resp = router.clone().oneshot(http_req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "Submitting 2-lock chain with only 1 lock VIP credit must return HTTP 429"
+    );
+
+    let tag1 = spend1.ds_tag.as_deref().unwrap();
+    let tag2 = spend2.ds_tag.as_deref().unwrap();
+    assert!(
+        !state.engine.is_hmc_entry_durable(tag1, &L2LockEntry::from(&spend1), root_valid_until).await,
+        "spend1 must not be committed after 429"
+    );
+    assert!(
+        !state.engine.is_hmc_entry_durable(tag2, &L2LockEntry::from(&spend2), root_valid_until).await,
+        "spend2 must not be committed after 429"
+    );
+
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(192),
+        "VIP credit must not be debited on 429"
+    );
+    assert_eq!(
+        tier_controller.vip_rolling_usage_at_for_test(&account_tag, now_ms),
+        0,
+        "VIP rolling usage must remain 0 on 429"
+    );
+    assert_eq!(
+        tier_controller.write_ema_micro_bj_at(now_sec),
+        0,
+        "Write EMA must remain 0 on 429"
+    );
+
+    // Scenario B: With sufficient aggregate credit (384 Byte-Years)
+    tier_controller.topup_vip_quota(account_tag, 192).unwrap();
+    assert_eq!(tier_controller.get_cached_vip_quota(&account_tag), Some(384));
+
+    let http_req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("authorization", format!("Bearer {vip_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(chain_bytes.clone()))
+        .unwrap();
+
+    let resp2 = router.clone().oneshot(http_req2).await.unwrap();
+    assert_eq!(
+        resp2.status(),
+        StatusCode::CREATED,
+        "Submitting 2-lock chain with sufficient aggregate VIP credit must return HTTP 201"
+    );
+
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(0),
+        "VIP credit must be debited by 384 Byte-Years"
+    );
+    assert_eq!(
+        tier_controller.vip_rolling_usage_at_for_test(&account_tag, now_ms),
+        384,
+        "Rolling VIP usage must be 384 Byte-Years"
+    );
+    assert_eq!(
+        tier_controller.write_ema_micro_bj_at(now_sec),
+        383_999_988,
+        "Write EMA must match aggregate micro Byte-Years"
+    );
+
+    tier_controller.wait_for_accounting_drain().await.unwrap();
+    let persisted = storage.load_ingress_accounting_state().unwrap().unwrap();
+    assert_eq!(
+        persisted.cumulative_micro_byte_years,
+        383_999_988,
+        "Persisted cumulative micro Byte-Years must be 383_999_988"
+    );
+
+    assert!(
+        state.engine.is_hmc_entry_durable(tag1, &L2LockEntry::from(&spend1), root_valid_until).await,
+        "spend1 must be committed after 201"
+    );
+    assert!(
+        state.engine.is_hmc_entry_durable(tag2, &L2LockEntry::from(&spend2), root_valid_until).await,
+        "spend2 must be committed after 201"
+    );
+}
+
+#[tokio::test]
+async fn test_s05_18_friends_and_public_multi_lock_chain_budget_boundaries() {
+    let (router, _operator, _storage, _identity, tier_controller, _pow, state, peer_manager) =
+        setup_test_app_with_clock();
+
+    let now_ms = peer_manager.net_time_ms();
+    let ttl_seconds = 31_535_999u64;
+    let root_valid_until = now_ms + ttl_seconds * 1000 + 500;
+
+    let key0 = SigningKey::from_bytes(&[60; 32]);
+    let key1 = SigningKey::from_bytes(&[61; 32]);
+    let key2 = SigningKey::from_bytes(&[62; 32]);
+
+    let r1 = sha3::Sha3_256::digest(key1.verifying_key().as_bytes()).into();
+    let mut root = make_test_hmc_genesis([0x60; 32], root_valid_until, &key0);
+    authenticate_root_fixture_with_receiver(&mut root, &key0, Some(r1));
+
+    state
+        .engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root.transaction_hash).into_string(),
+            L2LockEntry::from(&root),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(now_ms),
+            Some("Free"),
+            Some(0),
+            None,
+        )
+        .await;
+
+    let r2 = sha3::Sha3_256::digest(key2.verifying_key().as_bytes()).into();
+    let spend1 = make_test_causal_spend(&root, &key1, Some(r2), [0x61; 32], now_ms);
+    let spend2 = make_test_causal_spend(&spend1, &key2, None, [0x62; 32], now_ms);
+
+    let chain_req = L2ChainLockRequest {
+        auth: spend2.auth.clone(),
+        layer2_voucher_id: root.layer2_voucher_id.clone(),
+        chain: vec![spend1.clone(), spend2.clone()],
+    };
+    let chain_bytes = serde_json::to_vec(&chain_req).unwrap();
+
+    // 1. Friends (f2f_) test:
+    let peer_token = "f2f_test_friend_token_s05_18";
+    tier_controller.register_f2f_peer(peer_token);
+
+    // Consume friend daily budget so available is exactly 192 Byte-Years (< 384)
+    let daily_quota = tier_controller.calculate_daily_quota(1.0, 1.0);
+    tier_controller
+        .evaluate_f2f_quota(peer_token, daily_quota - 192, now_ms)
+        .expect("consume initial friend quota");
+
+    let http_req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("x-peer-token", peer_token)
+        .header("content-type", "application/json")
+        .body(Body::from(chain_bytes.clone()))
+        .unwrap();
+
+    let resp = router.clone().oneshot(http_req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "Friends budget sufficing for only 1 lock must reject 2-lock chain with 429"
+    );
+    let tag1 = spend1.ds_tag.as_deref().unwrap();
+    let tag2 = spend2.ds_tag.as_deref().unwrap();
+    assert!(!state.engine.is_hmc_entry_durable(tag1, &L2LockEntry::from(&spend1), root_valid_until).await);
+    assert!(!state.engine.is_hmc_entry_durable(tag2, &L2LockEntry::from(&spend2), root_valid_until).await);
+
+    // 2. Friends sufficient budget test with a fresh friend token
+    let peer_token_2 = "f2f_test_friend_token_2_s05_18";
+    tier_controller.register_f2f_peer(peer_token_2);
+
+    let http_req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("x-peer-token", peer_token_2)
+        .header("content-type", "application/json")
+        .body(Body::from(chain_bytes.clone()))
+        .unwrap();
+
+    let resp2 = router.clone().oneshot(http_req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::CREATED);
+    assert!(state.engine.is_hmc_entry_durable(tag1, &L2LockEntry::from(&spend1), root_valid_until).await);
+    assert!(state.engine.is_hmc_entry_durable(tag2, &L2LockEntry::from(&spend2), root_valid_until).await);
+
+    // 3. Public Tier test:
+    // Create new voucher chain for public test
+    let mut root_pub = make_test_hmc_genesis([0x65; 32], root_valid_until, &key0);
+    authenticate_root_fixture_with_receiver(&mut root_pub, &key0, Some(r1));
+    state
+        .engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root_pub.transaction_hash).into_string(),
+            L2LockEntry::from(&root_pub),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(now_ms),
+            Some("Free"),
+            Some(0),
+            None,
+        )
+        .await;
+
+    let spend1_pub = make_test_causal_spend(&root_pub, &key1, Some(r2), [0x66; 32], now_ms);
+    let spend2_pub = make_test_causal_spend(&spend1_pub, &key2, None, [0x67; 32], now_ms);
+    let chain_pub = L2ChainLockRequest {
+        auth: spend2_pub.auth.clone(),
+        layer2_voucher_id: root_pub.layer2_voucher_id.clone(),
+        chain: vec![spend1_pub.clone(), spend2_pub.clone()],
+    };
+    let chain_pub_bytes = serde_json::to_vec(&chain_pub).unwrap();
+
+    // Exhaust public pool for test (0 remaining)
+    tier_controller.exhaust_public_quota_for_test(now_ms);
+
+    let pub_req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("content-type", "application/json")
+        .body(Body::from(chain_pub_bytes.clone()))
+        .unwrap();
+
+    let pub_resp = router.clone().oneshot(pub_req).await.unwrap();
+    assert_eq!(
+        pub_resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "Public pool with insufficient budget must reject 2-lock chain with 429"
+    );
+    let pub_tag1 = spend1_pub.ds_tag.as_deref().unwrap();
+    let pub_tag2 = spend2_pub.ds_tag.as_deref().unwrap();
+    assert!(!state.engine.is_hmc_entry_durable(pub_tag1, &L2LockEntry::from(&spend1_pub), root_valid_until).await);
+    assert!(!state.engine.is_hmc_entry_durable(pub_tag2, &L2LockEntry::from(&spend2_pub), root_valid_until).await);
+}
+
+#[tokio::test]
+async fn test_s05_18_exact_authenticated_idempotent_chain_retries() {
+    let (router, _operator, _storage, _identity, tier_controller, _pow, state, peer_manager) =
+        setup_test_app_with_clock();
+
+    let now_ms = peer_manager.net_time_ms();
+    let now_sec = now_ms / 1000;
+    let ttl_seconds = 31_535_999u64;
+    let root_valid_until = now_ms + ttl_seconds * 1000 + 500;
+
+    let key0 = SigningKey::from_bytes(&[80; 32]);
+    let key1 = SigningKey::from_bytes(&[81; 32]);
+    let key2 = SigningKey::from_bytes(&[82; 32]);
+
+    let r1 = sha3::Sha3_256::digest(key1.verifying_key().as_bytes()).into();
+    let mut root = make_test_hmc_genesis([0x80; 32], root_valid_until, &key0);
+    authenticate_root_fixture_with_receiver(&mut root, &key0, Some(r1));
+
+    state
+        .engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root.transaction_hash).into_string(),
+            L2LockEntry::from(&root),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(now_ms),
+            Some("Free"),
+            Some(0),
+            None,
+        )
+        .await;
+
+    let r2 = sha3::Sha3_256::digest(key2.verifying_key().as_bytes()).into();
+    let spend1 = make_test_causal_spend(&root, &key1, Some(r2), [0x81; 32], now_ms);
+    let spend2 = make_test_causal_spend(&spend1, &key2, None, [0x82; 32], now_ms);
+
+    let chain_req = L2ChainLockRequest {
+        auth: spend2.auth.clone(),
+        layer2_voucher_id: root.layer2_voucher_id.clone(),
+        chain: vec![spend1.clone(), spend2.clone()],
+    };
+    let chain_bytes = serde_json::to_vec(&chain_req).unwrap();
+
+    let account_tag = [0x88u8; 32];
+    let vip_token = format!("vip_{}", hex::encode(account_tag));
+    tier_controller.register_vip_token(&vip_token, account_tag);
+    tier_controller.topup_vip_quota(account_tag, 500).unwrap();
+
+    // First attempt: succeeds with 201 Created
+    let http_req1 = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("authorization", format!("Bearer {vip_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(chain_bytes.clone()))
+        .unwrap();
+
+    let resp1 = router.clone().oneshot(http_req1).await.unwrap();
+    assert_eq!(resp1.status(), StatusCode::CREATED);
+
+    let bal_after_1 = tier_controller.get_cached_vip_quota(&account_tag).unwrap();
+    let usage_after_1 = tier_controller.vip_rolling_usage_at_for_test(&account_tag, now_ms);
+    let ema_after_1 = tier_controller.write_ema_micro_bj_at(now_sec);
+
+    // Second attempt: identical retry must succeed with HTTP 200 without double-charging
+    let http_req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("authorization", format!("Bearer {vip_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(chain_bytes.clone()))
+        .unwrap();
+
+    let resp2 = router.clone().oneshot(http_req2).await.unwrap();
+    assert_eq!(
+        resp2.status(),
+        StatusCode::OK,
+        "Idempotent retry of identical multi-lock chain must succeed with HTTP 200"
+    );
+
+    let bal_after_2 = tier_controller.get_cached_vip_quota(&account_tag).unwrap();
+    let usage_after_2 = tier_controller.vip_rolling_usage_at_for_test(&account_tag, now_ms);
+    let ema_after_2 = tier_controller.write_ema_micro_bj_at(now_sec);
+
+    assert_eq!(bal_after_1, bal_after_2, "VIP credit balance must not be charged on retry");
+    assert_eq!(usage_after_1, usage_after_2, "Rolling VIP usage must not increase on retry");
+    assert_eq!(ema_after_1, ema_after_2, "Write EMA must not increase on retry");
+}
+
+#[tokio::test]
+async fn test_s05_18_single_lock_root_spend_and_genesis_spend_chain_consistency() {
+    let (router, _operator, _storage, _identity, tier_controller, _pow, _state, peer_manager) =
+        setup_test_app_with_clock();
+
+    let now_ms = peer_manager.net_time_ms();
+    let ttl_seconds = 31_535_999u64;
+    let root_valid_until = now_ms + ttl_seconds * 1000 + 500;
+
+    let key0 = SigningKey::from_bytes(&[90; 32]);
+    let key1 = SigningKey::from_bytes(&[91; 32]);
+    let account_tag = [0x99u8; 32];
+    let vip_token = format!("vip_{}", hex::encode(account_tag));
+    tier_controller.register_vip_token(&vip_token, account_tag);
+
+    // 1. Single-lock genesis root registration via POST /v1/lock charges 192 Byte-Years
+    tier_controller.topup_vip_quota(account_tag, 192).unwrap();
+    let r1 = sha3::Sha3_256::digest(key1.verifying_key().as_bytes()).into();
+    let mut root = make_test_hmc_genesis([0x90; 32], root_valid_until, &key0);
+    authenticate_root_fixture_with_receiver(&mut root, &key0, Some(r1));
+
+    let root_req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("authorization", format!("Bearer {vip_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&root).unwrap()))
+        .unwrap();
+
+    let root_resp = router.clone().oneshot(root_req).await.unwrap();
+    assert_eq!(root_resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(0),
+        "Single root anchor registration must charge 192 Byte-Years"
+    );
+
+    // 2. Single-lock spend via POST /v1/lock charges 192 Byte-Years
+    tier_controller.topup_vip_quota(account_tag, 192).unwrap();
+    let spend1 = make_test_causal_spend(&root, &key1, None, [0x91; 32], now_ms);
+    let spend_req = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("authorization", format!("Bearer {vip_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&spend1).unwrap()))
+        .unwrap();
+
+    let spend_resp = router.clone().oneshot(spend_req).await.unwrap();
+    assert_eq!(spend_resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(0),
+        "Single lock spend must charge 192 Byte-Years"
+    );
+
+    // 3. Chain [genesis, spend] via POST /v1/lock/chain:
+    // Requires 384 Byte-Years for the 2 locks
+    let key0_b = SigningKey::from_bytes(&[92; 32]);
+    let key1_b = SigningKey::from_bytes(&[93; 32]);
+    let r1_b = sha3::Sha3_256::digest(key1_b.verifying_key().as_bytes()).into();
+    let mut root_b = make_test_hmc_genesis([0x92; 32], root_valid_until, &key0_b);
+    authenticate_root_fixture_with_receiver(&mut root_b, &key0_b, Some(r1_b));
+    let spend_b = make_test_causal_spend(&root_b, &key1_b, None, [0x93; 32], now_ms);
+
+    let chain_gen_spend = L2ChainLockRequest {
+        auth: spend_b.auth.clone(),
+        layer2_voucher_id: root_b.layer2_voucher_id.clone(),
+        chain: vec![root_b.clone(), spend_b.clone()],
+    };
+    let chain_gen_bytes = serde_json::to_vec(&chain_gen_spend).unwrap();
+
+    // 3a. With 192 Byte-Years: must reject with 429
+    tier_controller.topup_vip_quota(account_tag, 192).unwrap();
+    let http_req_insufficient = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("authorization", format!("Bearer {vip_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(chain_gen_bytes.clone()))
+        .unwrap();
+
+    let resp_insufficient = router.clone().oneshot(http_req_insufficient).await.unwrap();
+    assert_eq!(
+        resp_insufficient.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "Chain [genesis, spend] with only 1 lock budget must return 429"
+    );
+
+    // 3b. With 384 Byte-Years: succeeds with 201 Created
+    tier_controller.topup_vip_quota(account_tag, 192).unwrap();
+    assert_eq!(tier_controller.get_cached_vip_quota(&account_tag), Some(384));
+
+    let http_req_sufficient = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("authorization", format!("Bearer {vip_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(chain_gen_bytes.clone()))
+        .unwrap();
+
+    let resp_sufficient = router.clone().oneshot(http_req_sufficient).await.unwrap();
+    assert_eq!(resp_sufficient.status(), StatusCode::CREATED);
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(0),
+        "Chain [genesis, spend] must debit 384 Byte-Years"
+    );
+}
+
+#[tokio::test]
+async fn test_s05_18_bounded_chain_length_and_capacity_refusal() {
+    let (router, _operator, _storage, _identity, tier_controller, _pow, state, peer_manager) =
+        setup_test_app_with_clock();
+
+    let now_ms = peer_manager.net_time_ms();
+    let key1 = SigningKey::from_bytes(&[101; 32]);
+
+    // 1. Empty chain rejected with HTTP 400
+    let empty_chain = L2ChainLockRequest {
+        auth: L2AuthPayload {
+            ephemeral_pubkey: [0x33; 32],
+            auth_signature: None,
+        },
+        layer2_voucher_id: "test_voucher_empty".into(),
+        chain: vec![],
+    };
+    let http_req_empty = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&empty_chain).unwrap()))
+        .unwrap();
+    let resp_empty = router.clone().oneshot(http_req_empty).await.unwrap();
+    assert_eq!(resp_empty.status(), StatusCode::BAD_REQUEST);
+
+    // 2. Chain > 256 locks rejected with HTTP 400 before PoW/storage mutation
+    let mut large_hops = Vec::with_capacity(257);
+    for _i in 0..257u16 {
+        let mut hop = make_test_hmc_spend("v", "t", [0x01; 32], &key1);
+        hop.trap_r = None;
+        hop.trap_s = None;
+        hop.created_at_ms = now_ms;
+        large_hops.push(hop);
+    }
+    let large_chain = L2ChainLockRequest {
+        auth: large_hops[0].auth.clone(),
+        layer2_voucher_id: "v".into(),
+        chain: large_hops,
+    };
+    let http_req_large = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&large_chain).unwrap()))
+        .unwrap();
+    let resp_large = router
+        .clone()
+        .oneshot(http_req_large)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp_large.status(),
+        StatusCode::BAD_REQUEST,
+        "Chain length > 256 must be rejected with 400 Bad Request before PoW/storage"
+    );
+
+    // 3. Capacity refusal: when persistence is unavailable
+    let account_tag = [0xaa; 32];
+    let vip_token = format!("vip_{}", hex::encode(account_tag));
+    tier_controller.register_vip_token(&vip_token, account_tag);
+    tier_controller.topup_vip_quota(account_tag, 1000).unwrap();
+
+    let root_valid_until = now_ms + 31_535_999 * 1000 + 500;
+    let mut root_cap = make_test_hmc_genesis([0x03; 32], root_valid_until, &key1);
+    let r1 = sha3::Sha3_256::digest(key1.verifying_key().as_bytes()).into();
+    authenticate_root_fixture_with_receiver(&mut root_cap, &key1, Some(r1));
+    state
+        .engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root_cap.transaction_hash).into_string(),
+            L2LockEntry::from(&root_cap),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(now_ms),
+            Some("VIP"),
+            Some(192),
+            None,
+        )
+        .await;
+
+    let single_hop = make_test_causal_spend(&root_cap, &key1, None, [0x04; 32], now_ms);
+    let test_chain = L2ChainLockRequest {
+        auth: single_hop.auth.clone(),
+        layer2_voucher_id: root_cap.layer2_voucher_id.clone(),
+        chain: vec![single_hop],
+    };
+    let chain_bytes = serde_json::to_vec(&test_chain).unwrap();
+
+    tier_controller
+        .quota_worker_failure_handle()
+        .store(true, Ordering::Release);
+
+    let http_req_cap = Request::builder()
+        .method("POST")
+        .uri("/v1/lock/chain")
+        .header("authorization", format!("Bearer {vip_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(chain_bytes))
+        .unwrap();
+
+    let resp_cap = router.clone().oneshot(http_req_cap).await.unwrap();
+    assert_eq!(
+        resp_cap.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "When quota persistence is unavailable, must refuse with 503 Service Unavailable"
+    );
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&account_tag),
+        Some(1000),
+        "VIP quota must not be debited on persistence capacity refusal"
+    );
+}
+
+#[tokio::test]
+async fn test_s05_18_real_quic_gateway_to_receiver_aggregate_accounting() {
+    let temp = tempdir().unwrap();
+    let db_path = temp.path().join("s05_18_server.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let (engine, _) = DualTierEngine::new(storage.clone());
+    let pow = Arc::new(PowEngine::new(0));
+    let server_tc = Arc::new(TierController::new(storage.clone(), pow.clone()));
+    let server_id = NodeIdentity::generate();
+    let gateway_id = NodeIdentity::generate();
+    let gateway_pubkey = *gateway_id.node_pubkey();
+
+    let server_peer_mgr = Arc::new(PeerManager::new(vec![]));
+    server_peer_mgr.set_simulation_mode(true);
+    server_peer_mgr.seed_local_ticket_age(
+        *server_id.node_pubkey(),
+        *server_id.hrw_routing_id(),
+        std::time::Duration::from_secs(86_400),
+    );
+    let readiness = Arc::new(ShardReadinessManager::new());
+    for shard in 0..=u16::MAX {
+        readiness.mark_shard_ready(shard);
+    }
+
+    let handler = NodeRequestHandler::with_peer_manager(
+        engine.clone(),
+        storage.clone(),
+        server_id.clone(),
+        server_peer_mgr.clone(),
+    )
+    .with_readiness_manager(readiness)
+    .with_tier_controller(server_tc.clone());
+
+    let cancel_token = CancellationToken::new();
+    let server_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_id,
+        server_peer_mgr.clone(),
+        Arc::new(handler),
+        cancel_token.clone(),
+    )
+    .expect("bind server QUIC");
+    let server_addr = server_transport.local_addr().unwrap();
+    let _server_accept = server_transport.spawn_accept_loop();
+
+    let gw_cancel = CancellationToken::new();
+    let gw_peer_mgr = Arc::new(PeerManager::new(vec![server_addr]));
+    let gateway_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &gateway_id,
+        gw_peer_mgr.clone(),
+        Arc::new(DefaultRequestHandler),
+        gw_cancel.clone(),
+    )
+    .expect("bind gateway QUIC");
+    let _gw_accept = gateway_transport.spawn_accept_loop();
+
+    server_peer_mgr
+        .register_f2f_friend(gateway_pubkey, Some(gateway_transport.local_addr().unwrap()))
+        .await;
+    gw_peer_mgr
+        .register_f2f_friend(*server_id.node_pubkey(), Some(server_addr))
+        .await;
+
+    let conn = gateway_transport
+        .connect_peer(server_addr)
+        .await
+        .expect("connect QUIC peer");
+
+    let quic_now_ms = test_now_ms();
+    let ttl_s = 31_535_999u64;
+    let root_valid_until = quic_now_ms + ttl_s * 1000 + 500;
+
+    let key0 = SigningKey::from_bytes(&[70; 32]);
+    let key1 = SigningKey::from_bytes(&[71; 32]);
+    let key2 = SigningKey::from_bytes(&[72; 32]);
+
+    let r1 = sha3::Sha3_256::digest(key1.verifying_key().as_bytes()).into();
+    let mut root = make_test_hmc_genesis([0x70; 32], root_valid_until, &key0);
+    authenticate_root_fixture_with_receiver(&mut root, &key0, Some(r1));
+
+    engine
+        .ingress_hmc_lock_durable(
+            bs58::encode(root.transaction_hash).into_string(),
+            L2LockEntry::from(&root),
+            humoco_node::storage::IngressOrigin::ClientApi,
+            Some(quic_now_ms),
+            Some("Free"),
+            Some(0),
+            None,
+        )
+        .await;
+
+    let r2 = sha3::Sha3_256::digest(key2.verifying_key().as_bytes()).into();
+    let spend1 = make_test_causal_spend(&root, &key1, Some(r2), [0x71; 32], quic_now_ms);
+    let spend2 = make_test_causal_spend(&spend1, &key2, None, [0x72; 32], quic_now_ms);
+
+    let chain_req = L2ChainLockRequest {
+        auth: spend2.auth.clone(),
+        layer2_voucher_id: root.layer2_voucher_id.clone(),
+        chain: vec![spend1.clone(), spend2.clone()],
+    };
+
+    let base_fp = humoco_sim_core::quota::ByteYears::micro_from_ttl_seconds(ttl_s);
+    let total_fp = base_fp * 2;
+
+    let last_hop = spend2.clone();
+    let digest = compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::default(),
+        &gateway_pubkey,
+        0,
+        1,
+        quic_now_ms,
+        0,
+        0,
+        total_fp,
+        false,
+        &last_hop.transaction_hash,
+    );
+    let sender_sig = gateway_id.signing_key().sign(&digest).to_bytes();
+
+    let wire_payload = bincode::serialize(&LockWirePayload::Hmc {
+        req: last_hop.clone(),
+        chain: Some(chain_req.clone()),
+        root_valid_until,
+        epoch_day: 0,
+        epoch_seq: 1,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: gateway_pubkey,
+        sender_signature: sender_sig,
+        timestamp_ms: quic_now_ms,
+    })
+    .unwrap();
+    let header = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        1,
+        0,
+        0,
+        wire_payload.len() as u32,
+    );
+
+    // 1. Consume gateway node write quota on server such that remaining quota is 192 Byte-Years (< 384)
+    let daily_node_limit = server_tc.calculate_daily_quota(5.0, 1.0);
+    server_tc
+        .evaluate_node_write_quota(&gateway_pubkey, daily_node_limit - 192, quic_now_ms + 5_000)
+        .expect("consume node write quota");
+
+    let (resp_hdr, _) = gateway_transport
+        .send_request(&conn, &header, &wire_payload)
+        .await
+        .expect("send QUIC request");
+
+    assert_eq!(
+        resp_hdr.flags & FLAG_QUOTA_EXCEEDED,
+        FLAG_QUOTA_EXCEEDED,
+        "Multi-lock chain request over QUIC when budget suffices for only 1 lock must return FLAG_QUOTA_EXCEEDED"
+    );
+
+    let tag1 = spend1.ds_tag.as_deref().unwrap();
+    let tag2 = spend2.ds_tag.as_deref().unwrap();
+    assert!(!engine.is_hmc_entry_durable(tag1, &L2LockEntry::from(&spend1), root_valid_until).await);
+    assert!(!engine.is_hmc_entry_durable(tag2, &L2LockEntry::from(&spend2), root_valid_until).await);
+
+    // 2. Gateway 2 with fresh / full budget sends identical 2-lock chain over QUIC:
+    let gw_cancel2 = CancellationToken::new();
+    let gateway_id2 = NodeIdentity::generate();
+    let gateway_pubkey2 = *gateway_id2.node_pubkey();
+    let gw_peer_mgr2 = Arc::new(PeerManager::new(vec![server_addr]));
+    let gateway_transport2 = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &gateway_id2,
+        gw_peer_mgr2.clone(),
+        Arc::new(DefaultRequestHandler),
+        gw_cancel2.clone(),
+    )
+    .expect("bind gateway 2 QUIC");
+    let _gw_accept2 = gateway_transport2.spawn_accept_loop();
+
+    server_peer_mgr
+        .register_f2f_friend(gateway_pubkey2, Some(gateway_transport2.local_addr().unwrap()))
+        .await;
+    gw_peer_mgr2
+        .register_f2f_friend(*server_id.node_pubkey(), Some(server_addr))
+        .await;
+
+    let conn2 = gateway_transport2
+        .connect_peer(server_addr)
+        .await
+        .expect("connect QUIC peer 2");
+
+    let digest2 = compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::default(),
+        &gateway_pubkey2,
+        0,
+        1,
+        quic_now_ms,
+        0,
+        0,
+        total_fp,
+        false,
+        &last_hop.transaction_hash,
+    );
+    let sender_sig2 = gateway_id2.signing_key().sign(&digest2).to_bytes();
+
+    let wire_payload2 = bincode::serialize(&LockWirePayload::Hmc {
+        req: last_hop.clone(),
+        chain: Some(chain_req.clone()),
+        root_valid_until,
+        epoch_day: 0,
+        epoch_seq: 1,
+        cumulative_micro_byte_years: 0,
+        prev_day_final_bytes: 0,
+        current_anl_24h: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        sender_pubkey: gateway_pubkey2,
+        sender_signature: sender_sig2,
+        timestamp_ms: quic_now_ms,
+    })
+    .unwrap();
+    let header2 = WireHeader::new(
+        MsgType::LockVerifyRequest as u16,
+        1,
+        0,
+        0,
+        wire_payload2.len() as u32,
+    );
+
+    let (resp_hdr2, _) = gateway_transport2
+        .send_request(&conn2, &header2, &wire_payload2)
+        .await
+        .expect("send QUIC request 2");
+
+    assert_eq!(
+        resp_hdr2.flags & FLAG_QUOTA_EXCEEDED,
+        0,
+        "Multi-lock chain request over QUIC when budget suffices must succeed without FLAG_QUOTA_EXCEEDED"
+    );
+    assert!(engine.is_hmc_entry_durable(tag1, &L2LockEntry::from(&spend1), root_valid_until).await);
+    assert!(engine.is_hmc_entry_durable(tag2, &L2LockEntry::from(&spend2), root_valid_until).await);
+}
+
 
 
 

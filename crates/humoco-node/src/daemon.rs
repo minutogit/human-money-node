@@ -276,6 +276,8 @@ pub struct NodeDaemon {
     cancel_token: CancellationToken,
     bound_addr_tx: Mutex<Option<tokio::sync::oneshot::Sender<BoundAddrs>>>,
     engine_tx: Mutex<Option<tokio::sync::oneshot::Sender<crate::storage::DualTierEngine>>>,
+    tier_controller_tx:
+        Mutex<Option<tokio::sync::oneshot::Sender<Arc<crate::ingress::TierController>>>>,
 }
 
 impl NodeDaemon {
@@ -288,6 +290,7 @@ impl NodeDaemon {
             cancel_token: CancellationToken::new(),
             bound_addr_tx: Mutex::new(None),
             engine_tx: Mutex::new(None),
+            tier_controller_tx: Mutex::new(None),
         }
     }
 
@@ -304,6 +307,7 @@ impl NodeDaemon {
             cancel_token,
             bound_addr_tx: Mutex::new(None),
             engine_tx: Mutex::new(None),
+            tier_controller_tx: Mutex::new(None),
         }
     }
 
@@ -321,6 +325,7 @@ impl NodeDaemon {
             cancel_token,
             bound_addr_tx: Mutex::new(Some(tx)),
             engine_tx: Mutex::new(None),
+            tier_controller_tx: Mutex::new(None),
         }
     }
 
@@ -330,6 +335,17 @@ impl NodeDaemon {
         tx: tokio::sync::oneshot::Sender<crate::storage::DualTierEngine>,
     ) -> Self {
         if let Ok(mut lock) = self.engine_tx.try_lock() {
+            *lock = Some(tx);
+        }
+        self
+    }
+
+    /// Sets a tier controller notification channel to receive the active TierController upon startup.
+    pub fn with_tier_controller_sender(
+        self,
+        tx: tokio::sync::oneshot::Sender<Arc<crate::ingress::TierController>>,
+    ) -> Self {
+        if let Ok(mut lock) = self.tier_controller_tx.try_lock() {
             *lock = Some(tx);
         }
         self
@@ -527,6 +543,11 @@ impl NodeDaemon {
         ));
         *cleanup.tier_controller.lock() = Some(tier_controller.clone());
         *cleanup.quota_failed.lock() = Some(tier_controller.quota_worker_failure_handle());
+        if let Ok(mut lock) = self.tier_controller_tx.try_lock() {
+            if let Some(tx) = lock.take() {
+                let _ = tx.send(tier_controller.clone());
+            }
+        }
         // Client friend secrets are strictly decoupled from P2P network peer topology (A25-03).
         // P2P peer keys/endpoints are NEVER registered as HTTP ingress bearer tokens.
         for token in &self.config.f2f.tokens {
@@ -725,7 +746,11 @@ impl NodeDaemon {
             *current_id.hrw_routing_id(),
         );
         let init_bootstrap = self.bootstrap_new_region;
-        let thermo_interval_secs = if is_simulation { 5 } else { 60 };
+        let thermo_interval_secs = self
+            .config
+            .network
+            .fast_ticker_interval_secs
+            .unwrap_or(if is_simulation { 5 } else { 60 });
         let thermometer_handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(thermo_interval_secs));
@@ -764,13 +789,36 @@ impl NodeDaemon {
                         if let Some(new_day) = thermo_tc.advance_epoch_day(now_ms) {
                             debug!(new_day, "Network thermometer day rotated into 28-day ring buffer");
                         }
+
+                        let now_sec = now_ms / 1000;
+
+                        // Autonomous cold-start initialization (Spec 09 §5.3 / INV-0907):
+                        // Complete unfinished write/read thermometer history whenever eligible mature peer evidence arrives.
+                        if !thermo_tc.is_write_initialized() || !thermo_tc.is_read_initialized() {
+                            let (w_opt, r_opt) =
+                                thermo_pm.effective_network_medians(now_sec).await;
+                            if !thermo_tc.is_write_initialized() {
+                                if let Some(w) = w_opt {
+                                    thermo_tc.seed_from_peers(w);
+                                    info!(write_median = w, "Thermometer write buffer cold-start initialized from peer load evidence");
+                                }
+                            }
+                            if !thermo_tc.is_read_initialized() {
+                                if let Some(r) = r_opt {
+                                    thermo_tc.seed_read_from_peers(r);
+                                    info!(read_median = r, "Thermometer read buffer cold-start initialized from peer load evidence");
+                                }
+                            }
+                        }
+
                         // 2. Partition-merge detection on total (incl. immature) size.
                         let cur_total = thermo_pm.total_network_size().await;
                         if crate::network::PeerManager::is_merge_jump(prev_total, cur_total) {
-                            let now_sec = now_ms / 1000;
-                            let (write_median, _read_median) =
+                            let (write_median_opt, read_median_opt) =
                                 thermo_pm.effective_network_medians(now_sec).await;
-                            thermo_tc.fast_reseed_on_merge(write_median);
+                            if write_median_opt.is_some() || read_median_opt.is_some() {
+                                thermo_tc.fast_reseed_on_merge(write_median_opt, read_median_opt);
+                            }
                             thermo_pm.note_merge_detected(now_ms);
                             // Only drop local Ready state when the remote partition alone holds
                             // at least `needed` witnesses (cur_total - prev_total >= needed) so
@@ -792,7 +840,8 @@ impl NodeDaemon {
                             info!(
                                 prev_total,
                                 cur_total,
-                                write_median,
+                                write_median = ?write_median_opt,
+                                read_median = ?read_median_opt,
                                 invalidated_shards = invalidated,
                                 "Partition merge detected: thermometer fast-reseeded, 24h quota moratorium armed"
                             );

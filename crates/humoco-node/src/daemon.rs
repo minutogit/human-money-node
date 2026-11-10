@@ -623,6 +623,26 @@ impl NodeDaemon {
             }
         }
 
+        // Spec 07 §4 / INV-0705: load persisted deactivated direct F2F edges from redb
+        // so expired friends (>1 year dormancy) remain deactivated across restarts until operator reactivation.
+        match storage.all_deactivated_f2f_edges() {
+            Ok(deactivated) => {
+                if !deactivated.is_empty() {
+                    let added = peer_manager
+                        .import_persisted_deactivated_friends(&deactivated)
+                        .await;
+                    info!(
+                        persisted = deactivated.len(),
+                        imported = added,
+                        "Loaded persisted deactivated F2F edges into PeerManager"
+                    );
+                }
+            }
+            Err(err) => {
+                warn!(error = %err, "Failed to load deactivated F2F edges from redb");
+            }
+        }
+
         // Wire PeerManager to DualTierEngine and PowEngine for consensus time and ban propagation (Spec 07 / Phase 6)
         engine.set_peer_manager(peer_manager.clone()).await;
         pow_engine.set_clock(peer_manager.clock().clone());
@@ -758,6 +778,8 @@ impl NodeDaemon {
             interval.tick().await;
             let mut prev_total = thermo_pm.total_network_size().await;
             let mut max_seen_total = prev_total;
+            let mut pending_merge_write_reseed = false;
+            let mut pending_merge_read_reseed = false;
             loop {
                 tokio::select! {
                     _ = thermo_cancel.cancelled() => {
@@ -781,6 +803,7 @@ impl NodeDaemon {
                             });
                         }));
                         thermo_pm.prune_dormant_known_nodes(std::time::Instant::now()).await;
+                        let _ = thermo_pm.flush_pending_slashing_evidence().await;
                         // Mirror sync-readiness for the Provisional -> Final gate.
                         thermo_pm.set_local_sync_ready(
                             thermo_sync_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -814,11 +837,8 @@ impl NodeDaemon {
                         // 2. Partition-merge detection on total (incl. immature) size.
                         let cur_total = thermo_pm.total_network_size().await;
                         if crate::network::PeerManager::is_merge_jump(prev_total, cur_total) {
-                            let (write_median_opt, read_median_opt) =
-                                thermo_pm.effective_network_medians(now_sec).await;
-                            if write_median_opt.is_some() || read_median_opt.is_some() {
-                                thermo_tc.fast_reseed_on_merge(write_median_opt, read_median_opt);
-                            }
+                            pending_merge_write_reseed = true;
+                            pending_merge_read_reseed = true;
                             thermo_pm.note_merge_detected(now_ms);
                             // Only drop local Ready state when the remote partition alone holds
                             // at least `needed` witnesses (cur_total - prev_total >= needed) so
@@ -840,11 +860,58 @@ impl NodeDaemon {
                             info!(
                                 prev_total,
                                 cur_total,
-                                write_median = ?write_median_opt,
-                                read_median = ?read_median_opt,
                                 invalidated_shards = invalidated,
-                                "Partition merge detected: thermometer fast-reseeded, 24h quota moratorium armed"
+                                "Partition merge detected: 24h quota moratorium armed, merge reseed scheduled"
                             );
+                        }
+
+                        // Complete pending merge reseed independently of further size growth (Spec 09 §5.4 / INV-0908):
+                        if pending_merge_write_reseed || pending_merge_read_reseed {
+                            let (write_median_opt, read_median_opt) =
+                                thermo_pm.effective_network_medians(now_sec).await;
+
+                            if pending_merge_write_reseed && pending_merge_read_reseed {
+                                if write_median_opt.is_some() && read_median_opt.is_some() {
+                                    thermo_tc.fast_reseed_on_merge(write_median_opt, read_median_opt);
+                                    pending_merge_write_reseed = false;
+                                    pending_merge_read_reseed = false;
+                                    info!(
+                                        write_median = ?write_median_opt,
+                                        read_median = ?read_median_opt,
+                                        "Partition merge load evidence arrived: thermometer write and read buffers fast-reseeded"
+                                    );
+                                } else if write_median_opt.is_some() {
+                                    thermo_tc.fast_reseed_on_merge(write_median_opt, None);
+                                    pending_merge_write_reseed = false;
+                                    info!(
+                                        write_median = ?write_median_opt,
+                                        "Partition merge load evidence arrived: thermometer write buffer fast-reseeded (read pending peer evidence)"
+                                    );
+                                } else if read_median_opt.is_some() {
+                                    thermo_tc.fast_reseed_on_merge(None, read_median_opt);
+                                    pending_merge_read_reseed = false;
+                                    info!(
+                                        read_median = ?read_median_opt,
+                                        "Partition merge load evidence arrived: thermometer read buffer fast-reseeded (write pending peer evidence)"
+                                    );
+                                }
+                            } else if pending_merge_write_reseed && write_median_opt.is_some() {
+                                let read_val = read_median_opt.or_else(|| Some(thermo_tc.effective_read_ncb()));
+                                thermo_tc.fast_reseed_on_merge(write_median_opt, read_val);
+                                pending_merge_write_reseed = false;
+                                info!(
+                                    write_median = ?write_median_opt,
+                                    read_median = ?read_val,
+                                    "Partition merge load evidence arrived: delayed thermometer write buffer fast-reseeded"
+                                );
+                            } else if pending_merge_read_reseed && read_median_opt.is_some() {
+                                thermo_tc.fast_reseed_on_merge(None, read_median_opt);
+                                pending_merge_read_reseed = false;
+                                info!(
+                                    read_median = ?read_median_opt,
+                                    "Partition merge load evidence arrived: delayed thermometer read buffer fast-reseeded"
+                                );
+                            }
                         }
                         prev_total = cur_total;
                         max_seen_total = max_seen_total.max(cur_total);

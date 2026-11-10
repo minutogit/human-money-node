@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use crate::ingress::pow::{PowEngine, PowError};
 use crate::storage::{RedbStorage, StorageError};
+pub use humoco_sim_core::crypto::{compute_friends_token_hash, DOMAIN_FRIENDS_BEARER_TOKEN};
 use humoco_sim_core::quota::{
     ByteYears, NetworkThermometer, RollingQuotaCounter, MAX_WHALE_MULTIPLIER,
 };
@@ -1227,7 +1228,7 @@ impl TierController {
         required_byte_years: u64,
         now_ms: u64,
     ) -> Result<(), IngressError> {
-        let token_hash = *blake3::hash(peer_token.as_bytes()).as_bytes();
+        let token_hash = compute_friends_token_hash(peer_token);
         let daily_quota = self.calculate_daily_quota(1.0, 1.0);
         let now_sec = now_ms / 1000;
         let mut f2f_usage = self
@@ -1412,7 +1413,7 @@ impl TierController {
     /// Registers a trusted F2F client with optional friendly label and stores metadata.
     pub fn register_f2f_client(&self, token: &str, label: Option<&str>) {
         let token_trimmed = token.trim();
-        let token_hash = hex::encode(blake3::hash(token_trimmed.as_bytes()).as_bytes());
+        let token_hash = hex::encode(compute_friends_token_hash(token_trimmed));
         let client_label = match label {
             Some(l) if !l.trim().is_empty() => l.trim().to_string(),
             _ => format!("Client-{}", &token_hash[..8]),
@@ -1483,7 +1484,7 @@ impl TierController {
 
         let mut list = Vec::with_capacity(clients.len());
         for meta in clients.values() {
-            let token_hash = *blake3::hash(meta.token.as_bytes()).as_bytes();
+            let token_hash = compute_friends_token_hash(&meta.token);
             let writes_today = f2f_usage
                 .get(&token_hash)
                 .map_or(0, |counter| counter.usage_at(now_sec));
@@ -1652,7 +1653,7 @@ impl TierController {
                 return Err(IngressError::InvalidPeerToken);
             }
 
-            let token_hash = *blake3::hash(token_trimmed.as_bytes()).as_bytes();
+            let token_hash = compute_friends_token_hash(token_trimmed);
             let token_hash_hex = hex::encode(token_hash);
             if let Some(meta) = self
                 .f2f_clients
@@ -1956,7 +1957,13 @@ mod tests {
         let token = "removable_client_token";
         controller.register_f2f_client(token, Some("Kasse-Alt"));
 
-        let token_hash = hex::encode(blake3::hash(token.as_bytes()).as_bytes());
+        // Spec 13 / AGENTS Rule 5: Length-prefixed domain-separated Friends bearer credential hash
+        let domain_tag = b"HUMOCO_V1_FRIENDS_BEARER_TOKEN";
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&[domain_tag.len() as u8]);
+        hasher.update(domain_tag);
+        hasher.update(token.as_bytes());
+        let token_hash = hex::encode(hasher.finalize().as_bytes());
 
         // Remove by hash
         assert!(controller.remove_f2f_client(&token_hash));

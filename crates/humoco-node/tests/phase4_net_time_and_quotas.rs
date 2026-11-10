@@ -254,8 +254,9 @@ async fn test_phase4_wire_level_quota_rejection_and_3zone_plausibility() {
         vec![*identity_client.node_pubkey()],
     ));
     pm_shard
-        .learn_node_from_gossip(
+        .learn_node_from_gossip_with_hrw(
             *identity_client.node_pubkey(),
+            *identity_client.hrw_routing_id(),
             "127.0.0.1:9001".parse().unwrap(),
             0,
             None,
@@ -429,8 +430,9 @@ async fn test_phase4_adversarial_5x_whale_limit_flooding() {
         vec![*identity_client.node_pubkey()],
     ));
     pm_shard
-        .learn_node_from_gossip(
+        .learn_node_from_gossip_with_hrw(
             *identity_client.node_pubkey(),
+            *identity_client.hrw_routing_id(),
             "127.0.0.1:9001".parse().unwrap(),
             0,
             None,
@@ -560,8 +562,9 @@ async fn test_phase4_under_reporting_fraud_detection_and_gossip_slashing() {
         vec![*identity_client.node_pubkey()],
     ));
     pm_shard
-        .learn_node_from_gossip(
+        .learn_node_from_gossip_with_hrw(
             *identity_client.node_pubkey(),
+            *identity_client.hrw_routing_id(),
             "127.0.0.1:9001".parse().unwrap(),
             0,
             None,
@@ -739,8 +742,9 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         Vec::new(),
         vec![*identity_g.node_pubkey()],
     ));
-    pm_a.learn_node_from_gossip(
+    pm_a.learn_node_from_gossip_with_hrw(
         *identity_g.node_pubkey(),
+        *identity_g.hrw_routing_id(),
         "127.0.0.1:9001".parse().unwrap(),
         0,
         None,
@@ -764,8 +768,9 @@ async fn test_phase4_piggyback_heartbeat_cross_shard_silo_defense() {
         vec![*identity_a.node_pubkey()],
     ));
     pm_b.set_fraud_proof_tx(fraud_tx).await;
-    pm_b.learn_node_from_gossip(
+    pm_b.learn_node_from_gossip_with_hrw(
         *identity_a.node_pubkey(),
+        *identity_a.hrw_routing_id(),
         "127.0.0.1:9002".parse().unwrap(),
         0,
         None,
@@ -1646,3 +1651,727 @@ async fn test_s08_15_delayed_peer_evidence_completes_cold_start_via_daemon_ticke
     let _ = daemon_handle.await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_s08_16_delayed_merge_evidence_preinitialized_histories_real_quic() {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
+
+    use ed25519_dalek::Signer;
+    use humoco_node::config::NodeConfig;
+    use humoco_node::daemon::{BoundAddrs, NodeDaemon};
+    use humoco_node::identity::NodeIdentity;
+    use humoco_node::network::framing::{HeartbeatWirePayload, StatusQueryPayload};
+    use humoco_node::network::manager::PeerManager;
+    use humoco_node::network::{DefaultRequestHandler, QuicTransport};
+    use humoco_sim_core::wire::{MsgType, WireHeader, FLAG_QUOTA_EXCEEDED};
+
+    let temp = tempdir().expect("tempdir");
+    let mut config = NodeConfig::default();
+    config.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config.network.simulation_mode = true;
+    config.network.fast_ticker_interval_secs = Some(1);
+    config.storage.data_dir = temp.path().join("data");
+
+    let daemon_id = NodeIdentity::generate();
+    let daemon_cancel = CancellationToken::new();
+    let (bound_tx, bound_rx) = tokio::sync::oneshot::channel::<BoundAddrs>();
+    let (engine_tx, engine_rx) = tokio::sync::oneshot::channel();
+    let (tc_tx, tc_rx) = tokio::sync::oneshot::channel();
+
+    let daemon = NodeDaemon::with_bound_sender(
+        config,
+        daemon_id.clone(),
+        daemon_cancel.clone(),
+        bound_tx,
+    )
+    .with_engine_sender(engine_tx)
+    .with_tier_controller_sender(tc_tx)
+    .bootstrap_new_region();
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+    let bound = bound_rx.await.expect("daemon bound");
+    let engine = engine_rx.await.expect("engine received");
+    let tc = tc_rx.await.expect("tier_controller received");
+    let pm = engine
+        .peer_manager_rwlock_for_test()
+        .read()
+        .await
+        .clone()
+        .expect("pm attached");
+    pm.set_simulation_mode(true);
+
+    // Client QUIC transport connected to daemon
+    let client_id = NodeIdentity::generate();
+    let client_cancel = CancellationToken::new();
+    let client_pm = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*daemon_id.node_pubkey()],
+    ));
+    client_pm.set_simulation_mode(true);
+
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &client_id,
+        client_pm.clone(),
+        Arc::new(DefaultRequestHandler),
+        client_cancel.clone(),
+    )
+    .expect("bind client");
+    client_transport.spawn_accept_loop();
+
+    let client_addr = client_transport.local_addr().unwrap();
+    pm.register_f2f_friend(*client_id.node_pubkey(), Some(client_addr))
+        .await;
+
+    let conn = client_transport
+        .connect_peer_unchecked(bound.p2p_addr)
+        .await
+        .expect("connect to daemon");
+
+    // Establish an already running village before the merge; history is valid but low.
+    tc.seed_from_peers(960_000);
+    tc.seed_read_from_peers(50_000);
+    assert!(tc.is_write_initialized() && tc.is_read_initialized());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(pm.total_network_size().await, 1);
+
+    // 1. Join with an initial observation set of 20 mature remote identities (total size = 21) that initially lacks load evidence.
+    let mut remote_peers: Vec<NodeIdentity> = Vec::with_capacity(20);
+    remote_peers.push(client_id.clone());
+    for _ in 1..20 {
+        remote_peers.push(NodeIdentity::generate());
+    }
+
+    let now_instant = std::time::Instant::now();
+    let mature_offset = Duration::from_secs(86400 * 2);
+    for (i, peer) in remote_peers.iter().enumerate() {
+        let dummy_addr: SocketAddr = if i == 0 {
+            client_addr
+        } else {
+            format!("127.0.0.1:{}", 42000 + i).parse().unwrap()
+        };
+        pm.learn_node_from_gossip_with_hrw(
+            *peer.node_pubkey(),
+            *peer.hrw_routing_id(),
+            dummy_addr,
+            if i == 0 { 0 } else { 1 },
+            None,
+        )
+        .await;
+        pm.set_first_seen_for_test(peer.node_pubkey(), now_instant - mature_offset)
+            .await;
+    }
+
+    assert_eq!(
+        pm.total_network_size().await,
+        21,
+        "Total network size must be 21 (20 remote + 1 local)"
+    );
+
+    // 2. Deliver an invalid (bad-signature) evidence over real QUIC
+    let now_ms = pm.net_time_ms();
+    let bad_hb = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *remote_peers[1].node_pubkey(),
+        addr: "127.0.0.1:42001".parse().unwrap(),
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 2_885_390_753_978,
+        declared_read_ema_credits: 721_348,
+        signature: [0xee; 64], // corrupted/invalid signature
+        supported_suites_mask: 0,
+        piggyback_observations: Vec::new(),
+        pow_nonce: 0,
+        hrw_routing_id: *remote_peers[1].node_pubkey(),
+        ticket_epoch_t0: 0,
+        ttl: 16,
+    };
+    let bad_payload = bincode::serialize(&bad_hb).unwrap();
+    let mut bad_hdr = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, bad_payload.len() as u32);
+    bad_hdr.reserved = 1;
+    let _ = client_transport.send_unidirectional(&conn, &bad_hdr, &bad_payload).await;
+
+    // Allow daemon maintenance ticker to fire
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // Verify that absent or invalid (bad-signature) evidence does not initialize/corrupt the buffers
+    // and that effective baselines retain the initialized floors (960_000 write, 50_000 read).
+    assert_eq!(
+        tc.effective_ncb(),
+        960_000,
+        "Write baseline must reflect hard floor (960_000) when evidence is absent/invalid"
+    );
+    assert_eq!(
+        tc.effective_read_ncb(),
+        50_000,
+        "Read baseline must reflect hard floor (50_000) when evidence is absent/invalid"
+    );
+
+    // 3. Deliver eligible signed checkpoints (both write and read load evidence) later over real QUIC
+    // without changing network size (size remains 21).
+    // Write median = 2_000_000 (declared EMA = 2_885_390_753_978)
+    // Read median = 500_000 (declared EMA = 721_348)
+    let fresh_now_ms = pm.net_time_ms() + 1000;
+    for (i, peer) in remote_peers.iter().enumerate() {
+        let peer_addr = if i == 0 {
+            client_addr
+        } else {
+            format!("127.0.0.1:{}", 42000 + i).parse().unwrap()
+        };
+        let mut hb = HeartbeatWirePayload {
+            gateway_advertisement: None,
+            signing_checkpoint: None,
+            node_id: *peer.node_pubkey(),
+            addr: peer_addr,
+            timestamp_ms: fresh_now_ms,
+            declared_write_ema_micro_bj: 2_885_390_753_978,
+            declared_read_ema_credits: 721_348,
+            signature: [0u8; 64],
+            supported_suites_mask: 0,
+            piggyback_observations: Vec::new(),
+            pow_nonce: 0,
+            hrw_routing_id: *peer.node_pubkey(),
+            ticket_epoch_t0: 0,
+            ttl: 16,
+        };
+        hb.sign_origin(peer, fresh_now_ms, humoco_sim_core::types::NetworkId::default());
+        let payload = bincode::serialize(&hb).unwrap();
+        let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, (i + 10) as u64, 0, 0, payload.len() as u32);
+        hdr.reserved = if i == 0 { 0 } else { 1 };
+        client_transport
+            .send_unidirectional(&conn, &hdr, &payload)
+            .await
+            .expect("deliver eligible signed heartbeat");
+    }
+
+    // Wait for the evidence to be ingested by the daemon's QUIC uni-stream handlers
+    let wait_ev = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < wait_ev {
+        if pm.get_node_write_evidence(remote_peers[0].node_pubkey()).await.is_some()
+            && pm.get_node_write_evidence(remote_peers[1].node_pubkey()).await.is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let (new_w, new_r) = pm.effective_network_medians(pm.net_time_ms() / 1000).await;
+    assert!(new_w.unwrap_or(0) > 1_990_000 && new_r.unwrap_or(0) > 490_000, "eligible evidence must reach manager before regression assertion");
+    assert!(pm.is_in_merge_hysteresis(pm.net_time_ms()), "actual daemon ticker must have detected size jump");
+
+    // Network size must remain 21
+    assert_eq!(
+        pm.total_network_size().await,
+        21,
+        "Network size must remain unchanged at 21"
+    );
+
+    // 4. Exercise the actual autonomous daemon maintenance ticker (wait for the ticker to fire, do NOT call manual seed helpers!).
+    let ticker_deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    let mut initialized = false;
+    while tokio::time::Instant::now() < ticker_deadline {
+        if tc.effective_ncb() >= 1_990_000 && tc.effective_read_ncb() >= 490_000 {
+            initialized = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert!(
+        initialized,
+        "Maintenance ticker must reseed preinitialized write/read histories when delayed merge evidence arrives; got write={}, read={}",
+        tc.effective_ncb(),
+        tc.effective_read_ncb()
+    );
+
+    // 5. Subsequent real-QUIC request with daily read rate ~1_000_000 (which failed at 50_000 baseline) now succeeds
+    let sq_time = pm.net_time_ms();
+    let lock_id = [0x55; 32];
+    let sq_read_ema = 1_442_696u64; // ema_to_daily_rate(1_442_696) == 1_000_000
+    let sq_digest = humoco_sim_core::fraud::compute_ingress_envelope_digest(
+        humoco_sim_core::types::NetworkId::default(),
+        client_id.node_pubkey(),
+        0,
+        0,
+        sq_time,
+        0,
+        sq_read_ema,
+        0,
+        true,
+        &lock_id,
+    );
+    let sq_sig = client_id.signing_key().sign(&sq_digest).to_bytes();
+    let sq_payload = StatusQueryPayload {
+        lock_id,
+        parent_lock: [0; 32],
+        shard_id: 0,
+        sender_pubkey: *client_id.node_pubkey(),
+        declared_write_ema_micro_bj: 0,
+        current_read_ema_credits: sq_read_ema,
+        timestamp_ms: sq_time,
+        sender_signature: sq_sig,
+    };
+    let sq_bytes = bincode::serialize(&sq_payload).unwrap();
+    let sq_hdr = WireHeader::new(MsgType::StatusQuery as u16, 999, 0, 0, sq_bytes.len() as u32);
+    let (resp_hdr, _) = client_transport
+        .send_request(&conn, &sq_hdr, &sq_bytes)
+        .await
+        .expect("send StatusQuery over real QUIC");
+
+    assert_eq!(
+        resp_hdr.flags & FLAG_QUOTA_EXCEEDED,
+        0,
+        "StatusQuery with daily read rate ~1_000_000 must succeed under 500_000 median (cap 2_500_000)"
+    );
+
+    let eval_res = tc.evaluate_read_quota_with_time(
+        1u16,
+        192_001,
+        1.0,
+        Some(sq_time),
+    );
+    assert!(
+        eval_res.is_ok(),
+        "evaluate_read_quota_with_time for 192_001 must succeed under initialized 500_000 baseline"
+    );
+
+    // 6. Verify one-time initialization: delivering higher peer medians later at unchanged network size
+    // does NOT continually overwrite the established 28-day history on subsequent daemon ticks.
+    let higher_now_ms = pm.net_time_ms() + 5000;
+    for (i, peer) in remote_peers.iter().enumerate() {
+        let peer_addr = if i == 0 {
+            client_addr
+        } else {
+            format!("127.0.0.1:{}", 42000 + i).parse().unwrap()
+        };
+        let mut hb = HeartbeatWirePayload {
+            gateway_advertisement: None,
+            signing_checkpoint: None,
+            node_id: *peer.node_pubkey(),
+            addr: peer_addr,
+            timestamp_ms: higher_now_ms,
+            declared_write_ema_micro_bj: 7_213_476_884_945, // daily rate ~5_000_000
+            declared_read_ema_credits: 2_885_392, // daily rate ~2_000_000
+            signature: [0u8; 64],
+            supported_suites_mask: 0,
+            piggyback_observations: Vec::new(),
+            pow_nonce: 0,
+            hrw_routing_id: *peer.node_pubkey(),
+            ticket_epoch_t0: 0,
+            ttl: 16,
+        };
+        hb.sign_origin(peer, higher_now_ms, humoco_sim_core::types::NetworkId::default());
+        let payload = bincode::serialize(&hb).unwrap();
+        let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, (i + 100) as u64, 0, 0, payload.len() as u32);
+        hdr.reserved = if i == 0 { 0 } else { 1 };
+        let _ = client_transport.send_unidirectional(&conn, &hdr, &payload).await;
+    }
+
+    // Wait for another daemon tick
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // Effective medians must remain intact (one-time initialization)
+    assert!(
+        tc.effective_ncb() <= 2_100_000,
+        "Established 28-day write history must not be overwritten by higher peer medians at unchanged size, got {}",
+        tc.effective_ncb()
+    );
+    assert!(
+        tc.effective_read_ncb() <= 510_000,
+        "Established 28-day read history must not be overwritten by higher peer medians at unchanged size, got {}",
+        tc.effective_read_ncb()
+    );
+
+    // 7. Verify subsequent daily rotation: advancing epoch day rotates 1 slot normally without wiping
+    // the remaining 27 slots of initialized history.
+    let rotated = tc.advance_epoch_day(pm.net_time_ms() + 86_400_000);
+    assert!(rotated.is_some(), "advancing epoch day must rotate a day");
+
+    assert!(
+        tc.effective_ncb() >= 1_900_000 && tc.effective_ncb() <= 2_100_000,
+        "Rotating 1 slot out of 28 must preserve the other 27 slots of write history, got {}",
+        tc.effective_ncb()
+    );
+    assert!(
+        tc.effective_read_ncb() >= 480_000 && tc.effective_read_ncb() <= 520_000,
+        "Rotating 1 slot out of 28 must preserve the other 27 slots of read history, got {}",
+        tc.effective_read_ncb()
+    );
+
+    client_cancel.cancel();
+    daemon_cancel.cancel();
+    let _ = daemon_handle.await;
+}
+
+#[tokio::test]
+async fn test_s08_16_separate_write_and_read_arrival_across_ticks() {
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
+
+    use humoco_node::config::NodeConfig;
+    use humoco_node::daemon::{BoundAddrs, NodeDaemon};
+    use humoco_node::identity::NodeIdentity;
+    use humoco_sim_core::fraud::IngressEnvelopeEvidence;
+    use humoco_sim_core::types::NetworkId;
+
+    let temp = tempdir().expect("tempdir");
+    let mut config = NodeConfig::default();
+    config.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config.network.simulation_mode = true;
+    config.network.fast_ticker_interval_secs = Some(1);
+    config.storage.data_dir = temp.path().join("data");
+
+    let daemon_id = NodeIdentity::generate();
+    let daemon_cancel = CancellationToken::new();
+    let (bound_tx, bound_rx) = tokio::sync::oneshot::channel::<BoundAddrs>();
+    let (engine_tx, engine_rx) = tokio::sync::oneshot::channel();
+    let (tc_tx, tc_rx) = tokio::sync::oneshot::channel();
+
+    let daemon = NodeDaemon::with_bound_sender(
+        config,
+        daemon_id.clone(),
+        daemon_cancel.clone(),
+        bound_tx,
+    )
+    .with_engine_sender(engine_tx)
+    .with_tier_controller_sender(tc_tx)
+    .bootstrap_new_region();
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+    let _bound = bound_rx.await.expect("daemon bound");
+    let engine = engine_rx.await.expect("engine received");
+    let tc = tc_rx.await.expect("tier_controller received");
+    let pm = engine
+        .peer_manager_rwlock_for_test()
+        .read()
+        .await
+        .clone()
+        .expect("pm attached");
+    pm.set_simulation_mode(true);
+
+    // Initial pre-merge state: village baselines
+    tc.seed_from_peers(960_000);
+    tc.seed_read_from_peers(50_000);
+    assert!(tc.is_write_initialized() && tc.is_read_initialized());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(pm.total_network_size().await, 1);
+
+    // 1. Join with 20 mature nodes without evidence (size 1 -> 21)
+    let mut remote_peers: Vec<NodeIdentity> = Vec::with_capacity(20);
+    for _ in 0..20 {
+        remote_peers.push(NodeIdentity::generate());
+    }
+    let now_instant = std::time::Instant::now();
+    let mature_offset = Duration::from_secs(86400 * 2);
+    for (i, peer) in remote_peers.iter().enumerate() {
+        let dummy_addr: SocketAddr = format!("127.0.0.1:{}", 43000 + i).parse().unwrap();
+        pm.learn_node_from_gossip_with_hrw(
+            *peer.node_pubkey(),
+            *peer.hrw_routing_id(),
+            dummy_addr,
+            1,
+            None,
+        )
+        .await;
+        pm.set_first_seen_for_test(peer.node_pubkey(), now_instant - mature_offset)
+            .await;
+    }
+    assert_eq!(pm.total_network_size().await, 21);
+
+    // Wait for merge detection ticker to fire without evidence
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(tc.effective_ncb(), 960_000);
+    assert_eq!(tc.effective_read_ncb(), 50_000);
+
+    // 2. Separate arrival across ticks: Deliver ONLY write evidence first
+    let now_ms = pm.net_time_ms();
+    for peer in &remote_peers {
+        let ev_write = IngressEnvelopeEvidence::new(
+            NetworkId::default(),
+            *peer.node_pubkey(),
+            0,
+            0,
+            now_ms,
+            2_885_390_753_978, // daily rate ~2_000_000
+            0,
+            0,
+            false,
+            [0u8; 32],
+            [0u8; 64],
+        );
+        pm.update_node_write_evidence(peer.node_pubkey(), ev_write)
+            .await;
+    }
+
+    // Wait for ticker to reseed write
+    let ticker_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    while tokio::time::Instant::now() < ticker_deadline {
+        if tc.effective_ncb() >= 1_990_000 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        tc.effective_ncb() >= 1_990_000,
+        "Write baseline must reseed from delayed write evidence, got {}",
+        tc.effective_ncb()
+    );
+
+    // 3. Deliver read evidence on a subsequent tick
+    let fresh_ms = pm.net_time_ms() + 1000;
+    for peer in &remote_peers {
+        let ev_read = IngressEnvelopeEvidence::new(
+            NetworkId::default(),
+            *peer.node_pubkey(),
+            0,
+            0,
+            fresh_ms,
+            0,
+            721_348, // daily rate ~500_000
+            0,
+            true,
+            [0u8; 32],
+            [0u8; 64],
+        );
+        pm.update_node_read_evidence(peer.node_pubkey(), ev_read)
+            .await;
+    }
+
+    // Wait for ticker to complete read reseed
+    let read_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    while tokio::time::Instant::now() < read_deadline {
+        if tc.effective_read_ncb() >= 490_000 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        tc.effective_read_ncb() >= 490_000,
+        "Read baseline must reseed when delayed read evidence arrives, got {}",
+        tc.effective_read_ncb()
+    );
+    assert!(
+        tc.effective_ncb() >= 1_990_000,
+        "Write baseline must remain intact, got {}",
+        tc.effective_ncb()
+    );
+
+    // 4. Repeated ticks: higher evidence must not overwrite completed merge reseed at unchanged size
+    let higher_ms = pm.net_time_ms() + 2000;
+    for peer in &remote_peers {
+        let ev_w = IngressEnvelopeEvidence::new(
+            NetworkId::default(),
+            *peer.node_pubkey(),
+            0,
+            0,
+            higher_ms,
+            7_213_476_884_945, // ~5_000_000
+            0,
+            0,
+            false,
+            [0u8; 32],
+            [0u8; 64],
+        );
+        let ev_r = IngressEnvelopeEvidence::new(
+            NetworkId::default(),
+            *peer.node_pubkey(),
+            0,
+            0,
+            higher_ms,
+            0,
+            2_885_392, // ~2_000_000
+            0,
+            true,
+            [0u8; 32],
+            [0u8; 64],
+        );
+        pm.update_node_write_evidence(peer.node_pubkey(), ev_w).await;
+        pm.update_node_read_evidence(peer.node_pubkey(), ev_r).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        tc.effective_ncb() <= 2_100_000,
+        "Established write history must not be overwritten, got {}",
+        tc.effective_ncb()
+    );
+    assert!(
+        tc.effective_read_ncb() <= 510_000,
+        "Established read history must not be overwritten, got {}",
+        tc.effective_read_ncb()
+    );
+
+    daemon_cancel.cancel();
+    let _ = daemon_handle.await;
+}
+
+#[tokio::test]
+async fn test_s08_16_separate_read_before_write_arrival_across_ticks() {
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
+
+    use humoco_node::config::NodeConfig;
+    use humoco_node::daemon::{BoundAddrs, NodeDaemon};
+    use humoco_node::identity::NodeIdentity;
+    use humoco_sim_core::fraud::IngressEnvelopeEvidence;
+    use humoco_sim_core::types::NetworkId;
+
+    let temp = tempdir().expect("tempdir");
+    let mut config = NodeConfig::default();
+    config.network.p2p_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config.network.rpc_listen_addr = "127.0.0.1:0".parse().unwrap();
+    config.network.simulation_mode = true;
+    config.network.fast_ticker_interval_secs = Some(1);
+    config.storage.data_dir = temp.path().join("data");
+
+    let daemon_id = NodeIdentity::generate();
+    let daemon_cancel = CancellationToken::new();
+    let (bound_tx, bound_rx) = tokio::sync::oneshot::channel::<BoundAddrs>();
+    let (engine_tx, engine_rx) = tokio::sync::oneshot::channel();
+    let (tc_tx, tc_rx) = tokio::sync::oneshot::channel();
+
+    let daemon = NodeDaemon::with_bound_sender(
+        config,
+        daemon_id.clone(),
+        daemon_cancel.clone(),
+        bound_tx,
+    )
+    .with_engine_sender(engine_tx)
+    .with_tier_controller_sender(tc_tx)
+    .bootstrap_new_region();
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+    let _bound = bound_rx.await.expect("daemon bound");
+    let engine = engine_rx.await.expect("engine received");
+    let tc = tc_rx.await.expect("tier_controller received");
+    let pm = engine
+        .peer_manager_rwlock_for_test()
+        .read()
+        .await
+        .clone()
+        .expect("pm attached");
+    pm.set_simulation_mode(true);
+
+    // Initial pre-merge state: village baselines
+    tc.seed_from_peers(960_000);
+    tc.seed_read_from_peers(50_000);
+    assert!(tc.is_write_initialized() && tc.is_read_initialized());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(pm.total_network_size().await, 1);
+
+    // 1. Join with 20 mature nodes without evidence (size 1 -> 21)
+    let mut remote_peers: Vec<NodeIdentity> = Vec::with_capacity(20);
+    for _ in 0..20 {
+        remote_peers.push(NodeIdentity::generate());
+    }
+    let now_instant = std::time::Instant::now();
+    let mature_offset = Duration::from_secs(86400 * 2);
+    for (i, peer) in remote_peers.iter().enumerate() {
+        let dummy_addr: SocketAddr = format!("127.0.0.1:{}", 44000 + i).parse().unwrap();
+        pm.learn_node_from_gossip_with_hrw(
+            *peer.node_pubkey(),
+            *peer.hrw_routing_id(),
+            dummy_addr,
+            1,
+            None,
+        )
+        .await;
+        pm.set_first_seen_for_test(peer.node_pubkey(), now_instant - mature_offset)
+            .await;
+    }
+    assert_eq!(pm.total_network_size().await, 21);
+
+    // Wait for merge detection ticker to fire without evidence
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(tc.effective_ncb(), 960_000);
+    assert_eq!(tc.effective_read_ncb(), 50_000);
+
+    // 2. Separate arrival across ticks: Deliver ONLY read evidence first
+    let now_ms = pm.net_time_ms();
+    for peer in &remote_peers {
+        let ev_read = IngressEnvelopeEvidence::new(
+            NetworkId::default(),
+            *peer.node_pubkey(),
+            0,
+            0,
+            now_ms,
+            0,
+            721_348, // daily rate ~500_000
+            0,
+            true,
+            [0u8; 32],
+            [0u8; 64],
+        );
+        pm.update_node_read_evidence(peer.node_pubkey(), ev_read)
+            .await;
+    }
+
+    // Wait for ticker to reseed read
+    let ticker_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    while tokio::time::Instant::now() < ticker_deadline {
+        if tc.effective_read_ncb() >= 490_000 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        tc.effective_read_ncb() >= 490_000,
+        "Read baseline must reseed from delayed read evidence, got {}",
+        tc.effective_read_ncb()
+    );
+    assert_eq!(
+        tc.effective_ncb(),
+        960_000,
+        "Write baseline must remain at hard floor when write evidence is not yet delivered"
+    );
+
+    // 3. Deliver write evidence on a subsequent tick
+    let fresh_ms = pm.net_time_ms() + 1000;
+    for peer in &remote_peers {
+        let ev_write = IngressEnvelopeEvidence::new(
+            NetworkId::default(),
+            *peer.node_pubkey(),
+            0,
+            0,
+            fresh_ms,
+            2_885_390_753_978, // daily rate ~2_000_000
+            0,
+            0,
+            false,
+            [0u8; 32],
+            [0u8; 64],
+        );
+        pm.update_node_write_evidence(peer.node_pubkey(), ev_write)
+            .await;
+    }
+
+    // Wait for ticker to complete write reseed
+    let write_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    while tokio::time::Instant::now() < write_deadline {
+        if tc.effective_ncb() >= 1_990_000 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        tc.effective_ncb() >= 1_990_000,
+        "Write baseline must reseed when delayed write evidence arrives, got {}",
+        tc.effective_ncb()
+    );
+    assert!(
+        tc.effective_read_ncb() >= 490_000 && tc.effective_read_ncb() <= 510_000,
+        "Read baseline must preserve its reseeded value and not be overwritten by write/5 fallback, got {}",
+        tc.effective_read_ncb()
+    );
+
+    daemon_cancel.cancel();
+    let _ = daemon_handle.await;
+}

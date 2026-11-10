@@ -1171,10 +1171,11 @@ async fn test_phase11f_100_node_hrw_quorum_validation() {
     pm.set_local_sync_ready(true);
     for i in 0u64..100 {
         let nid = fake_pubkey(777_000 + i);
+        let hrw = *blake3::hash(&nid).as_bytes();
         let addr: SocketAddr = format!("10.11.0.{}:9090", (i % 253) + 1)
             .parse()
             .expect("addr");
-        pm.learn_node_from_gossip(nid, addr, 1, None).await;
+        pm.learn_node_from_gossip_with_hrw(nid, hrw, addr, 1, None).await;
         pm.set_first_seen_for_test(
             &nid,
             std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
@@ -1184,8 +1185,9 @@ async fn test_phase11f_100_node_hrw_quorum_validation() {
     // 5 fresh immature newcomers must NOT inflate N.
     for i in 0u64..5 {
         let nid = fake_pubkey(999_000 + i);
+        let hrw = *blake3::hash(&nid).as_bytes();
         let addr: SocketAddr = format!("10.12.0.{}:9090", i + 1).parse().expect("addr");
-        pm.learn_node_from_gossip(nid, addr, 1, None).await;
+        pm.learn_node_from_gossip_with_hrw(nid, hrw, addr, 1, None).await;
     }
     assert_eq!(
         pm.active_nodes_count(),

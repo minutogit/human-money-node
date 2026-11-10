@@ -79,7 +79,13 @@ async fn shard_pool_capacity_idle_lru_and_inbound_busy_protection_are_neutral() 
         .unwrap();
         let addr = server.local_addr().unwrap();
         client_manager
-            .learn_node_from_gossip(*server_identity.node_pubkey(), addr, 0, None)
+            .learn_node_from_gossip_with_hrw(
+                *server_identity.node_pubkey(),
+                *server_identity.hrw_routing_id(),
+                addr,
+                0,
+                None,
+            )
             .await;
         server.spawn_accept_loop();
         if index < 256 {

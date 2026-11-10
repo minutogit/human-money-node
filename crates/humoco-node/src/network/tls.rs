@@ -346,47 +346,40 @@ pub fn build_quinn_client_config_with_identity_and_network(
     Ok(client_config)
 }
 
-
-/// Builds a Quinn ClientConfig for connecting to P2P peers without client authentication (fallback).
-pub fn build_quinn_client_config() -> Result<quinn::ClientConfig, NodeError> {
-    build_quinn_client_config_with_network(humoco_sim_core::types::NetworkId::default())
-}
-
-/// Builds a Quinn ClientConfig without client authentication for a specific network.
-pub fn build_quinn_client_config_with_network(
-    network_id: humoco_sim_core::types::NetworkId,
-) -> Result<quinn::ClientConfig, NodeError> {
-    init_crypto_provider();
-
-    let verifier = Arc::new(P2pCertVerifier::new());
-    let mut client_tls_config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-
-    client_tls_config.alpn_protocols = vec![get_alpn_for_network(network_id).to_vec()];
-
-    let quic_client_config =
-        quinn::crypto::rustls::QuicClientConfig::try_from(client_tls_config)
-            .map_err(|e| NodeError::Tls(format!("Failed to build QuicClientConfig: {}", e)))?;
-
-    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
-
-    let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(
-        std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
-            .try_into()
-            .map_err(|e| NodeError::Tls(format!("Invalid idle timeout: {}", e)))?,
-    ));
-    transport_config.keep_alive_interval(None);
-    client_config.transport_config(Arc::new(transport_config));
-
-    Ok(client_config)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test fixture for an unauthenticated client config (used strictly for test verification).
+    fn build_quinn_client_config_unauthenticated_for_test() -> Result<quinn::ClientConfig, NodeError> {
+        init_crypto_provider();
+
+        let verifier = Arc::new(P2pCertVerifier::new());
+        let mut client_tls_config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+
+        client_tls_config.alpn_protocols =
+            vec![get_alpn_for_network(humoco_sim_core::types::NetworkId::default()).to_vec()];
+
+        let quic_client_config =
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_tls_config)
+                .map_err(|e| NodeError::Tls(format!("Failed to build QuicClientConfig: {}", e)))?;
+
+        let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config.max_idle_timeout(Some(
+            std::time::Duration::from_secs(TIER2_QUIC_IDLE_TIMEOUT_SECS)
+                .try_into()
+                .map_err(|e| NodeError::Tls(format!("Invalid idle timeout: {}", e)))?,
+        ));
+        transport_config.keep_alive_interval(None);
+        client_config.transport_config(Arc::new(transport_config));
+
+        Ok(client_config)
+    }
 
     #[test]
     fn test_certificate_generation() {
@@ -413,7 +406,7 @@ mod tests {
         let server_config = build_quinn_server_config(&identity);
         assert!(server_config.is_ok());
 
-        let client_config_no_auth = build_quinn_client_config();
+        let client_config_no_auth = build_quinn_client_config_unauthenticated_for_test();
         assert!(client_config_no_auth.is_ok());
 
         let client_config_with_id = build_quinn_client_config_with_identity(&identity);

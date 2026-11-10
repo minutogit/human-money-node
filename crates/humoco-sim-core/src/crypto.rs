@@ -20,6 +20,9 @@ pub const DOMAIN_HRW_ROUTING_TICKET: &[u8] = b"HUMOCO_V1_HRW_ROUTING_TICKET";
 pub const DOMAIN_ATTESTATION_PAYLOAD: &[u8] = b"HUMOCO_V1_ATTESTATION_PAYLOAD";
 pub const DOMAIN_HB_ANNOUNCE: &[u8] = b"HUMOCO_V1_HB_ANNOUNCE";
 
+/// Domain tag for canonical length-prefixed hashing of Friends client bearer tokens (Spec 13 section 3 / AGENTS Rule 5).
+pub const DOMAIN_FRIENDS_BEARER_TOKEN: &[u8] = b"HUMOCO_V1_FRIENDS_BEARER_TOKEN";
+
 /// Computes the deterministic work score W from a 32-byte PoW proof hash.
 ///
 /// Uses leading zeros and the top 64-bit prefix for O(1) arithmetic without big-int crates.
@@ -56,6 +59,19 @@ pub fn compute_whitened_hrw_id(
     hasher.update(&nonce.to_le_bytes());
     hasher.update(&t0.to_le_bytes());
     hasher.update(pow_proof);
+    *hasher.finalize().as_bytes()
+}
+
+/// Computes the canonical 32-byte hash of a Friends client bearer token using length-prefixed domain separation.
+///
+/// Preimage layout:
+/// `BLAKE3( [tag_len] || DOMAIN_FRIENDS_BEARER_TOKEN || token.trim().as_bytes() )`
+pub fn compute_friends_token_hash(token: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    let tag_len = DOMAIN_FRIENDS_BEARER_TOKEN.len() as u8;
+    hasher.update(&[tag_len]);
+    hasher.update(DOMAIN_FRIENDS_BEARER_TOKEN);
+    hasher.update(token.trim().as_bytes());
     *hasher.finalize().as_bytes()
 }
 
@@ -626,5 +642,28 @@ mod tests {
         hasher.update(&t0.to_le_bytes());
         hasher.update(&pow_proof);
         assert_eq!(whitened, *hasher.finalize().as_bytes());
+    }
+
+    #[test]
+    fn test_compute_friends_token_hash_domain_separation() {
+        let token = "f2f_0123456789abcdef0123456789abcdef";
+        let hash = compute_friends_token_hash(token);
+
+        // Verification against independent manual derivation
+        let mut hasher = blake3::Hasher::new();
+        let tag_len = DOMAIN_FRIENDS_BEARER_TOKEN.len() as u8;
+        hasher.update(&[tag_len]);
+        hasher.update(DOMAIN_FRIENDS_BEARER_TOKEN);
+        hasher.update(token.as_bytes());
+        let expected = *hasher.finalize().as_bytes();
+        assert_eq!(hash, expected);
+
+        // Normalization: whitespace is trimmed
+        let hash_trimmed = compute_friends_token_hash(&format!("  {}  \n", token));
+        assert_eq!(hash_trimmed, hash);
+
+        // Domain separation: bare BLAKE3 MUST NOT match
+        let bare = *blake3::hash(token.as_bytes()).as_bytes();
+        assert_ne!(hash, bare);
     }
 }

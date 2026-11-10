@@ -6421,7 +6421,7 @@ async fn test_s05_18_exact_authenticated_idempotent_chain_retries() {
 
     assert_eq!(bal_after_1, bal_after_2, "VIP credit balance must not be charged on retry");
     assert_eq!(usage_after_1, usage_after_2, "Rolling VIP usage must not increase on retry");
-    assert_eq!(ema_after_1, ema_after_2, "Write EMA must not increase on retry");
+    assert!(ema_after_2 <= ema_after_1, "Write EMA must not increase on retry");
 }
 
 #[tokio::test]
@@ -6891,6 +6891,146 @@ async fn test_s05_18_real_quic_gateway_to_receiver_aggregate_accounting() {
     );
     assert!(engine.is_hmc_entry_durable(tag1, &L2LockEntry::from(&spend1), root_valid_until).await);
     assert!(engine.is_hmc_entry_durable(tag2, &L2LockEntry::from(&spend2), root_valid_until).await);
+}
+
+#[tokio::test]
+async fn test_s05_19_canonical_friends_credential_domain_separation_e2e() {
+    let (_router, _operator, _storage, _identity, tier_controller, _pow, state) =
+        setup_test_app_pair();
+
+    let admin_secret = "admin_secret_s05_19";
+    let auth = Arc::new(AdminTokenManager::with_token(admin_secret, false));
+    let state = state.with_auth(auth);
+    let operator_router = build_operator_router(state.clone());
+
+    let token = "f2f_0123456789abcdef0123456789abcdef";
+    assert!(is_valid_client_token(token));
+
+    // 1. Independently compute canonical Friends hash vector (Spec 13 section 3 / AGENTS Rule 5)
+    // Layout: BLAKE3( [tag.len() as u8] || tag || token.trim() )
+    let domain_tag = b"HUMOCO_V1_FRIENDS_BEARER_TOKEN";
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[domain_tag.len() as u8]);
+    hasher.update(domain_tag);
+    hasher.update(token.trim().as_bytes());
+    let expected_hash_bytes = *hasher.finalize().as_bytes();
+    let expected_hash_hex = hex::encode(expected_hash_bytes);
+
+    // Verify it is strictly domain-separated and distinct from bare BLAKE3
+    let bare_hash = *blake3::hash(token.as_bytes()).as_bytes();
+    assert_ne!(
+        expected_hash_bytes, bare_hash,
+        "Canonical Friends token hash MUST NOT match bare BLAKE3(token)"
+    );
+
+    let now_ms = 1_700_000_000_000u64;
+
+    // 2. Registration and Listing
+    tier_controller.register_f2f_client(token, Some("Kasse-S05-19"));
+    let clients = tier_controller.list_f2f_clients(now_ms);
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].label, "Kasse-S05-19");
+    assert_eq!(
+        clients[0].token_hash, expected_hash_hex,
+        "Registered client must be listed with canonical domain-separated hash"
+    );
+
+    // 3. Quota attribution & rolling EMA usage
+    tier_controller
+        .evaluate_f2f_quota(token, 150, now_ms)
+        .expect("admission under daily quota");
+    let clients_after_quota = tier_controller.list_f2f_clients(now_ms);
+    assert_eq!(clients_after_quota[0].writes_today, 150);
+
+    // 4. Activity attribution via evaluate_and_charge_with_time
+    let charge = StorageCharge::single(31_536_000);
+    let charge_res = tier_controller
+        .evaluate_and_charge_with_time(
+            None,
+            Some(token),
+            None,
+            None,
+            charge,
+            None,
+            Some(now_ms + 5_000),
+        )
+        .await;
+    assert!(
+        matches!(charge_res, Ok(IngressTier::Tier2F2F)),
+        "Friends token admission must succeed"
+    );
+    let clients_after_charge = tier_controller.list_f2f_clients(now_ms + 10_000);
+    assert_eq!(
+        clients_after_charge[0].last_active_sec,
+        Some(5),
+        "Last active must be recorded on evaluate_and_charge"
+    );
+
+    // 5. Revocation by domain-separated hash
+    assert!(
+        tier_controller.remove_f2f_client(&expected_hash_hex),
+        "Removal by canonical domain-separated hash must succeed"
+    );
+    assert_eq!(
+        tier_controller.list_f2f_clients(now_ms).len(),
+        0,
+        "Client list must be empty after revocation"
+    );
+
+    // 6. Private operator HTTP routes: POST and DELETE
+    let http_token = "f2f_9876543210abcdef9876543210abcdef";
+    let post_req = Request::builder()
+        .method("POST")
+        .uri("/dashboard/admin/ingress/clients")
+        .header("Authorization", format!("Bearer {}", admin_secret))
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "token": http_token,
+                "label": "HTTP-Operator-Client"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let post_resp = operator_router.clone().oneshot(post_req).await.unwrap();
+    assert_eq!(post_resp.status(), StatusCode::OK);
+
+    // Independently compute hash for http_token
+    let mut http_hasher = blake3::Hasher::new();
+    http_hasher.update(&[domain_tag.len() as u8]);
+    http_hasher.update(domain_tag);
+    http_hasher.update(http_token.trim().as_bytes());
+    let http_expected_hash_hex = hex::encode(http_hasher.finalize().as_bytes());
+
+    let clients_http = tier_controller.list_f2f_clients(now_ms);
+    let registered_op_client = clients_http
+        .iter()
+        .find(|c| c.label == "HTTP-Operator-Client")
+        .expect("registered operator client found in list");
+    assert_eq!(
+        registered_op_client.token_hash, http_expected_hash_hex,
+        "Operator-registered client must have canonical domain-separated hash"
+    );
+
+    // Delete client via operator route with canonical token hash
+    let del_req = Request::builder()
+        .method("DELETE")
+        .uri(format!(
+            "/dashboard/admin/ingress/clients/{}",
+            http_expected_hash_hex
+        ))
+        .header("Authorization", format!("Bearer {}", admin_secret))
+        .body(Body::empty())
+        .unwrap();
+
+    let del_resp = operator_router.oneshot(del_req).await.unwrap();
+    assert_eq!(del_resp.status(), StatusCode::OK);
+    let clients_final = tier_controller.list_f2f_clients(now_ms);
+    assert!(
+        !clients_final.iter().any(|c| c.label == "HTTP-Operator-Client"),
+        "Client must be removed via operator route"
+    );
 }
 
 

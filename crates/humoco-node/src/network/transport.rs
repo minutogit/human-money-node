@@ -2724,7 +2724,7 @@ impl QuicTransport {
             tasks: tasks.clone(),
             identity: identity.clone(),
             shared_identity: None,
-            peer_manager,
+            peer_manager: peer_manager.clone(),
             handler,
             cancel_token: cancel_token.clone(),
             stream_semaphore: Arc::new(Semaphore::new(STREAM_CONCURRENCY_LIMIT)),
@@ -2746,12 +2746,37 @@ impl QuicTransport {
 
         let transport_for_broadcast = transport.clone();
         let cancel = cancel_token.clone();
+        let is_sim = peer_manager.is_simulation_mode();
+        let retry_interval_ms = if is_sim { 50 } else { 1000 };
         transport.tasks.spawn(async move {
+            let mut retry_ticker =
+                tokio::time::interval(tokio::time::Duration::from_millis(retry_interval_ms));
+            retry_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
-                    _ = cancel.cancelled() => break,
+                    _ = cancel.cancelled() => {
+                        // Orderly shutdown handling: final flush attempt before shutdown completes (S06-15)
+                        if let Err(err) = transport_for_broadcast.peer_manager.flush_pending_slashing_evidence().await {
+                            warn!(error = %err, "Final flush of pending slashing evidence during shutdown failed");
+                        }
+                        break;
+                    }
                     Some((proof, sender)) = fraud_rx.recv() => {
                         transport_for_broadcast.broadcast_equivocation_proof_to_f2f_except(&proof, sender).await;
+                        // Forwarding pressure has eased (channel slot freed); flush any retained pending evidence
+                        if transport_for_broadcast.peer_manager.has_unsettled_slashing_evidence() {
+                            if let Err(err) = transport_for_broadcast.peer_manager.flush_pending_slashing_evidence().await {
+                                warn!(error = %err, "Flush of pending slashing evidence after forward progress failed");
+                            }
+                        }
+                    }
+                    _ = retry_ticker.tick() => {
+                        // Periodic retry lifecycle: check for any unsettled evidence from prior storage/forwarding faults
+                        if transport_for_broadcast.peer_manager.has_unsettled_slashing_evidence() {
+                            if let Err(err) = transport_for_broadcast.peer_manager.flush_pending_slashing_evidence().await {
+                                warn!(error = %err, "Periodic flush of pending slashing evidence failed; will retry");
+                            }
+                        }
                     }
                 }
             }

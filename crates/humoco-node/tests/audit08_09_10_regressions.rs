@@ -59,8 +59,14 @@ async fn relay_probe(signed: bool) {
         .await;
     let real = "127.0.0.1:31337".parse().unwrap();
     let forged = "127.0.0.1:31338".parse().unwrap();
-    mb.learn_node_from_gossip(*victim.node_pubkey(), real, 0, None)
-        .await;
+    mb.learn_node_from_gossip_with_hrw(
+        *victim.node_pubkey(),
+        *victim.hrw_routing_id(),
+        real,
+        0,
+        None,
+    )
+    .await;
     a.spawn_accept_loop();
     b.spawn_accept_loop();
     let conn = a.connect_peer(ba).await.unwrap();
@@ -1244,6 +1250,275 @@ async fn test_s06_real_quic_collector_equivocation_and_storage_fault_isolation()
     client_transport.drain_tasks().await;
     peer_transport.drain_tasks().await;
 
+    worker.abort();
+    let _ = worker.await;
+}
+
+fn s06_14_evidence_fixture(seed: u8) -> humoco_node::network::manager::PendingSlashingEvidence {
+    let identity = NodeIdentity::generate();
+    let parent = [seed; 32];
+    let shard = u16::from_be_bytes([seed, seed]);
+    let a = humoco_node::api::routes::create_attestation_for_network(
+        &identity,
+        [1; 32],
+        parent,
+        shard,
+        0,
+        1000,
+        Default::default(),
+    )
+    .to_core()
+    .unwrap();
+    let b = humoco_node::api::routes::create_attestation_for_network(
+        &identity,
+        [2; 32],
+        parent,
+        shard,
+        0,
+        1000,
+        Default::default(),
+    )
+    .to_core()
+    .unwrap();
+    let proof = humoco_sim_core::fraud::FraudProofPayload::new_shard_equivocation_with_pubkey(
+        a,
+        b,
+        *identity.node_pubkey(),
+    );
+    assert!(
+        humoco_node::network::transport::verify_equivocation_first_party_network(
+            Default::default(),
+            identity.verifying_key(),
+            &proof
+        )
+    );
+    let proof_bytes = bincode::serialize(&proof).unwrap();
+    let evidence_hash = *blake3::hash(&proof_bytes).as_bytes();
+    humoco_node::network::manager::PendingSlashingEvidence {
+        proof_bytes,
+        proof,
+        evidence_hash,
+        offender: *identity.node_pubkey(),
+        detected_ms: 1000,
+        durable_committed: false,
+        forward_queued: false,
+    }
+}
+
+#[tokio::test]
+async fn test_s06_14_pending_saturation_ownership_and_monotonicity() {
+    let mut cache = humoco_node::network::manager::ObservedVoteCache::new(2);
+    let ev1 = s06_14_evidence_fixture(10);
+    let ev2 = s06_14_evidence_fixture(20);
+    let ev3 = s06_14_evidence_fixture(30);
+
+    let off1 = ev1.offender;
+    let off2 = ev2.offender;
+    let off3 = ev3.offender;
+
+    // 1. Insert 2 unsettled proofs into capacity-2 cache
+    assert!(cache.insert_pending_evidence(ev1.clone()).is_ok());
+    assert!(cache.insert_pending_evidence(ev2.clone()).is_ok());
+    assert_eq!(cache.pending_count(), 2);
+
+    // Both ev1 and ev2 must be present
+    assert!(cache.find_pending_for_offender(&off1).is_some());
+    assert!(cache.find_pending_for_offender(&off2).is_some());
+
+    // S06-14 / INV-1402: Attempting to insert a 3rd proof when all capacity is occupied
+    // by unsettled proofs MUST NOT evict unsettled proofs; must return explicit backpressure.
+    let res = cache.insert_pending_evidence(ev3.clone());
+    assert!(res.is_err(), "Must apply bounded backpressure when saturated with unsettled proofs");
+    assert_eq!(cache.pending_count(), 2);
+    assert!(
+        cache.find_pending_for_offender(&off1).is_some(),
+        "unsettled ev1 must not be evicted at capacity"
+    );
+    assert!(
+        cache.find_pending_for_offender(&off2).is_some(),
+        "unsettled ev2 must not be evicted at capacity"
+    );
+
+    // 2. Monotonic completion flags:
+    cache.mark_durable_committed(&ev1.evidence_hash);
+    let item = cache.find_pending_for_offender(&off1).unwrap();
+    assert!(item.durable_committed);
+    assert!(!item.forward_queued);
+
+    // Duplicate insertion of ev1 with durable_committed: false must NOT reset durable_committed!
+    assert!(cache.insert_pending_evidence(ev1.clone()).is_ok());
+    let item_after = cache.find_pending_for_offender(&off1).unwrap();
+    assert!(item_after.durable_committed, "durable_committed flag must be monotonic");
+
+    // 3. Settled item eviction:
+    // Mark ev1 as forwarded as well (now fully settled: durable_committed && forward_queued)
+    cache.mark_forward_queued(&ev1.evidence_hash);
+
+    // Inserting ev3 now reclaims the settled slot from ev1 while preserving unsettled ev2!
+    assert!(cache.insert_pending_evidence(ev3.clone()).is_ok());
+    assert_eq!(cache.pending_count(), 2);
+    assert!(
+        cache.find_pending_for_offender(&off2).is_some(),
+        "unsettled ev2 must still be retained"
+    );
+    assert!(
+        cache.find_pending_for_offender(&off3).is_some(),
+        "ev3 must be successfully inserted into reclaimed settled slot"
+    );
+}
+
+#[tokio::test]
+async fn test_s06_15_autonomous_retry_lifecycle_real_quic_storage_and_forwarding() {
+    let fail_write = Arc::new(AtomicBool::new(false));
+    let backend = FaultBackend {
+        inner: Arc::new(redb::backends::InMemoryBackend::new()),
+        fail_write: fail_write.clone(),
+    };
+    let client_db = Arc::new(
+        RedbStorage::open_with_backend(backend.clone(), std::path::Path::new("/tmp/retry_fault.redb"))
+            .unwrap(),
+    );
+    let (client_engine, worker) = DualTierEngine::new(client_db.clone());
+
+    let client_id = NodeIdentity::generate();
+    let client_cancel = CancellationToken::new();
+    let client_pm = Arc::new(PeerManager::new(Vec::new()));
+    client_pm.set_simulation_mode(true);
+    client_engine.set_peer_manager(client_pm.clone()).await;
+
+    let client_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &client_id,
+        client_pm.clone(),
+        Arc::new(DefaultRequestHandler),
+        client_cancel.clone(),
+    )
+    .unwrap();
+    let client_addr = client_transport.local_addr().unwrap();
+    client_transport.set_sync_ready(true);
+    client_transport.spawn_accept_loop();
+
+    let peer_id = NodeIdentity::generate();
+    let peer_cancel = CancellationToken::new();
+    let peer_pm = Arc::new(PeerManager::new(Vec::new()));
+    peer_pm.set_simulation_mode(true);
+    let parent_lock = [0x99; 32];
+    let shard_id = u16::from_be_bytes([parent_lock[0], parent_lock[1]]);
+
+    let mock_handler = Arc::new(EquivocationMockHandler {
+        peer_identity: peer_id.clone(),
+        lock_id: [0x02; 32],
+        parent_lock,
+        shard_id,
+    });
+
+    let peer_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &peer_id,
+        peer_pm.clone(),
+        mock_handler,
+        peer_cancel.clone(),
+    )
+    .unwrap();
+    let peer_addr = peer_transport.local_addr().unwrap();
+    peer_transport.set_sync_ready(true);
+    peer_transport.spawn_accept_loop();
+
+    client_pm
+        .register_f2f_friend(*peer_id.node_pubkey(), Some(peer_addr))
+        .await;
+    peer_pm
+        .register_f2f_friend(*client_id.node_pubkey(), Some(client_addr))
+        .await;
+
+    // Prior vote for lock_id 0x01
+    let prior_att = humoco_node::api::routes::create_attestation_for_network(
+        &peer_id,
+        [0x01; 32],
+        parent_lock,
+        shard_id,
+        0,
+        1000,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    assert!(
+        humoco_node::api::routes::verify_peer_attestation(
+            &client_pm,
+            &prior_att,
+            ([0x01; 32], parent_lock),
+            shard_id,
+            0,
+            humoco_sim_core::types::NetworkId::Mainnet,
+            Some(*peer_id.node_pubkey()),
+        )
+        .await
+        .unwrap()
+    );
+
+    // Inject storage write failure
+    fail_write.store(true, Ordering::SeqCst);
+
+    let candidates = [(*peer_id.node_pubkey(), peer_addr)];
+    let expected_members = [*peer_id.node_pubkey()];
+    let query_payload = [0u8; 32];
+    let mut collected = Vec::new();
+    let query = humoco_node::PeerAttestationQuery {
+        transport: &client_transport,
+        peer_mgr: &client_pm,
+        candidate_nodes: &candidates,
+        expected_members: Some(&expected_members),
+        parent_lock,
+        lookup_tag: None,
+        voucher_id: None,
+        msg_type: MsgType::LockVerifyRequest,
+        resp_msg_type: MsgType::LockVerifyResponse,
+        payload: &query_payload,
+        lock_id: [0x02; 32],
+        target_status: 0,
+        shard_id,
+        required_q: 1,
+        shard_query_depth: 1,
+        my_load: 0,
+        quota_limit: 10_000,
+        network_id: humoco_sim_core::types::NetworkId::Mainnet,
+        checkout_deadline: None,
+    };
+    let _ = humoco_node::collect_peer_attestations(query, &mut collected).await;
+
+    // Offender is immediately banned in RAM
+    assert!(client_pm.is_banned(peer_id.node_pubkey()).await);
+    // But NOT yet durably banned due to injected fault
+    assert!(!client_db.is_node_banned(peer_id.node_pubkey()).unwrap());
+
+    // Clear the fault
+    fail_write.store(false, Ordering::SeqCst);
+    let reopened = Arc::new(
+        RedbStorage::open_with_backend(backend, std::path::Path::new("/tmp/retry_fault.redb"))
+            .unwrap(),
+    );
+    client_pm.set_storage(Arc::downgrade(&reopened));
+
+    // S06-15: We do NOT send any new attestation from offender, and do NOT manually call flush.
+    // The autonomous lifecycle must detect the unsettled evidence and flush it!
+    let mut durably_persisted = false;
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if reopened.is_node_banned(peer_id.node_pubkey()).unwrap() {
+            durably_persisted = true;
+            break;
+        }
+    }
+    assert!(
+        durably_persisted,
+        "S06-15 regression: autonomous retry failed to durably persist evidence without manual flush"
+    );
+
+    client_cancel.cancel();
+    peer_cancel.cancel();
+    client_transport.close();
+    peer_transport.close();
+    client_transport.drain_tasks().await;
+    peer_transport.drain_tasks().await;
     worker.abort();
     let _ = worker.await;
 }

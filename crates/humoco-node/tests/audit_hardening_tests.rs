@@ -89,9 +89,10 @@ async fn test_24h_finality_hysteresis_and_immature_rejection() {
     // Add 25 nodes, but keep them IMMATURE (< 24h incubation)
     for i in 0..25u64 {
         let dummy_id = *blake3::hash(&i.to_le_bytes()).as_bytes();
+        let dummy_hrw = *blake3::hash(&[dummy_id.as_slice(), b"hrw"].concat()).as_bytes();
         let addr = format!("127.0.0.1:{}", 20000 + i).parse().unwrap();
         peer_mgr
-            .learn_node_from_gossip(dummy_id, addr, 1, None)
+            .learn_node_from_gossip_with_hrw(dummy_id, dummy_hrw, addr, 1, None)
             .await;
     }
 

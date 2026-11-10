@@ -664,19 +664,38 @@ impl ObservedVoteCache {
     }
 
     /// Inserts or updates pending slashing evidence.
-    pub fn insert_pending_evidence(&mut self, evidence: PendingSlashingEvidence) {
+    /// Preserves ownership of unsettled proofs and enforces bounded backpressure at capacity (INV-1402 / S06-14).
+    pub fn insert_pending_evidence(
+        &mut self,
+        evidence: PendingSlashingEvidence,
+    ) -> Result<(), crate::error::NodeError> {
         let hash = evidence.evidence_hash;
-        if let std::collections::hash_map::Entry::Occupied(mut e) = self.pending_evidence.entry(hash) {
-            e.insert(evidence);
-            return;
+        if let Some(existing) = self.pending_evidence.get_mut(&hash) {
+            existing.durable_committed |= evidence.durable_committed;
+            existing.forward_queued |= evidence.forward_queued;
+            return Ok(());
         }
         if self.pending_queue.len() >= self.capacity {
-            if let Some(oldest) = self.pending_queue.pop_front() {
-                self.pending_evidence.remove(&oldest);
+            // Reclaim only settled evidence (both durable redb committed and forwarded)
+            let settled: Vec<[u8; 32]> = self
+                .pending_evidence
+                .iter()
+                .filter(|(_, ev)| ev.durable_committed && ev.forward_queued)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in settled {
+                self.pending_evidence.remove(&k);
+                self.pending_queue.retain(|h| h != &k);
             }
+        }
+        if self.pending_queue.len() >= self.capacity {
+            return Err(crate::error::NodeError::LocalCapacity(
+                "pending slashing evidence cache saturated with unsettled proofs",
+            ));
         }
         self.pending_evidence.insert(hash, evidence);
         self.pending_queue.push_back(hash);
+        Ok(())
     }
 
     pub fn mark_durable_committed(&mut self, hash: &[u8; 32]) {
@@ -770,6 +789,8 @@ pub struct PeerManager {
     local_ticket_observation: LocalTicketObservation,
     persisted_ticket_ages: PersistedTicketAges,
     observed_votes: Arc<parking_lot::Mutex<ObservedVoteCache>>,
+    deactivated_friends: Arc<RwLock<HashSet<[u8; 32]>>>,
+    flush_mutex: Arc<tokio::sync::Mutex<()>>,
     storage: Arc<parking_lot::RwLock<Option<std::sync::Weak<crate::storage::RedbStorage>>>>,
     engine_banned_nodes: Arc<parking_lot::RwLock<Option<EngineBannedNodesHandle>>>,
     f2f_collab: Arc<parking_lot::Mutex<crate::network::f2f_collab::F2fCollabManager>>,
@@ -885,6 +906,8 @@ impl PeerManager {
             persisted_ticket_ages: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             known_active_shards: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
             observed_votes: Arc::new(parking_lot::Mutex::new(ObservedVoteCache::new(4096))),
+            deactivated_friends: Arc::new(RwLock::new(HashSet::new())),
+            flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
             storage: Arc::new(parking_lot::RwLock::new(None)),
             engine_banned_nodes: Arc::new(parking_lot::RwLock::new(None)),
             f2f_collab: Arc::new(parking_lot::Mutex::new(
@@ -1761,7 +1784,7 @@ impl PeerManager {
 
         {
             let mut cache = self.observed_votes.lock();
-            cache.insert_pending_evidence(evidence.clone());
+            cache.insert_pending_evidence(evidence.clone())?;
         }
 
         // Apply local RAM containment directly via .await (no guards held across .await, no unbounded detached spawns)
@@ -1823,9 +1846,16 @@ impl PeerManager {
         }
     }
 
-    /// Flushes any retained pending slashing evidence to durable redb storage and queues for forwarding (S06-13).
-    /// Safe for concurrent calls and periodic maintenance runs.
+    /// Returns true if there is any unsettled pending slashing evidence waiting for durable commit or forwarding.
+    pub fn has_unsettled_slashing_evidence(&self) -> bool {
+        let cache = self.observed_votes.lock();
+        !cache.get_unsettled_pending().is_empty()
+    }
+
+    /// Flushes any retained pending slashing evidence to durable redb storage and queues for forwarding (S06-13 / S06-15).
+    /// Safe for concurrent calls and periodic maintenance runs with bounded persistence concurrency.
     pub async fn flush_pending_slashing_evidence(&self) -> Result<usize, crate::error::NodeError> {
+        let _guard = self.flush_mutex.lock().await;
         let pending = {
             let cache = self.observed_votes.lock();
             cache.get_unsettled_pending()
@@ -2465,6 +2495,7 @@ impl PeerManager {
     /// acquired, mutated, and dropped before the next one is taken. Never
     /// holds `f2f_friends` while acquiring `peers`/`verifying_keys`.
     pub async fn register_f2f_friend(&self, node_id: [u8; 32], addr: Option<SocketAddr>) {
+        self.reactivate_f2f_friend(&node_id).await;
         {
             let mut friends = self.f2f_friends.write().await;
             friends.insert(node_id, addr);
@@ -2492,6 +2523,7 @@ impl PeerManager {
     /// Phase 10 (Deadlock-Fix): lock decoupling — snapshot what is needed,
     /// drop each guard before taking the next lock. No nested holding.
     pub async fn add_trusted_f2f_peer(&self, pubkey: [u8; 32]) {
+        self.reactivate_f2f_friend(&pubkey).await;
         let existing_addr = {
             let friends = self.f2f_friends.read().await;
             friends.get(&pubkey).copied().flatten()
@@ -2560,6 +2592,18 @@ impl PeerManager {
             let mut friends = self.f2f_friends.write().await;
             friends.remove(pubkey);
         }
+        {
+            let mut deact = self.deactivated_friends.write().await;
+            deact.remove(pubkey);
+        }
+        let storage = self.storage.read().as_ref().and_then(|w| w.upgrade());
+        if let Some(storage) = storage {
+            let key = *pubkey;
+            let _ = tokio::task::spawn_blocking(move || {
+                storage.reactivate_f2f_edge(&key)
+            })
+            .await;
+        }
 
         if ed25519_dalek::VerifyingKey::from_bytes(pubkey).is_ok() {
             {
@@ -2581,7 +2625,11 @@ impl PeerManager {
 
     /// Checks if a given node_id is an authorized direct F2F friend.
     /// Based strictly on permanent NodePubKey / NodeId, not on HRW ticket.
+    /// Deactivated edges (>1 year inactivity) return false until explicitly reactivated (Spec 07 §4 / INV-0705).
     pub async fn is_f2f_friend(&self, node_id: &[u8; 32]) -> bool {
+        if self.deactivated_friends.read().await.contains(node_id) {
+            return false;
+        }
         let friends = self.f2f_friends.read().await;
         friends.contains_key(node_id)
     }
@@ -2593,19 +2641,25 @@ impl PeerManager {
     /// lock holding, so the AB-BA inversion vs `register_f2f_friend`
     /// (`f2f_friends` -> `peers`) is impossible.
     pub async fn is_f2f_addr(&self, addr: &SocketAddr) -> bool {
-        let is_friend_peer = {
+        let (is_friend_peer, peer_node_id) = {
             let peers = self.peers.read().await;
             peers
                 .get(addr)
-                .map(|peer| peer.conn_type == PeerConnectionType::FriendToFriend)
-                .unwrap_or(false)
+                .map(|peer| (peer.conn_type == PeerConnectionType::FriendToFriend, peer.node_id))
+                .unwrap_or((false, None))
         };
+        let deactivated = self.deactivated_friends.read().await;
         if is_friend_peer {
+            if let Some(ref nid) = peer_node_id {
+                if deactivated.contains(nid) {
+                    return false;
+                }
+            }
             return true;
         }
         let friends = self.f2f_friends.read().await;
-        for opt_addr in friends.values() {
-            if opt_addr.as_ref() == Some(addr) {
+        for (pk, opt_addr) in friends.iter() {
+            if opt_addr.as_ref() == Some(addr) && !deactivated.contains(pk) {
                 return true;
             }
         }
@@ -2672,32 +2726,6 @@ impl PeerManager {
             entry.incubation_duration = incubation;
             entry.promote_pending_ticket_if_mature(now);
         }
-    }
-
-    /// Learns or updates a node discovered through F2F gossip.
-    /// Legacy wrapper: hrw_routing_id == node_pubkey (fast-path) for backward compatibility.
-    pub async fn learn_node_from_gossip(
-        &self,
-        node_id: [u8; 32],
-        addr: SocketAddr,
-        hops: u8,
-        ingress_peer: Option<SocketAddr>,
-    ) {
-        self.learn_node_from_gossip_at(node_id, addr, hops, ingress_peer, Instant::now())
-            .await;
-    }
-
-    /// Learns or updates a node discovered through F2F gossip with an explicit timestamp (for simulation and testing).
-    pub async fn learn_node_from_gossip_at(
-        &self,
-        node_id: [u8; 32],
-        addr: SocketAddr,
-        hops: u8,
-        ingress_peer: Option<SocketAddr>,
-        now: Instant,
-    ) {
-        self.learn_node_from_gossip_with_hrw_at(node_id, node_id, addr, hops, ingress_peer, now)
-            .await;
     }
 
     /// Semantically decoupled learning method with explicit HRW routing ticket (defaults to work_score = 1).
@@ -3195,7 +3223,8 @@ impl PeerManager {
 
     /// Resolves the socket address of a known node (F2F or gossip-learned).
     pub async fn get_known_node_addr(&self, node_id: &[u8; 32]) -> Option<SocketAddr> {
-        {
+        let deactivated = self.deactivated_friends.read().await;
+        if !deactivated.contains(node_id) {
             let friends = self.f2f_friends.read().await;
             if let Some(Some(addr)) = friends.get(node_id) {
                 return Some(*addr);
@@ -3455,12 +3484,16 @@ impl PeerManager {
     pub async fn expected_authorized_node_keys(&self, addr: &SocketAddr) -> HashSet<[u8; 32]> {
         let mut expected = HashSet::new();
         let banned = self.banned_nodes.read().await.clone();
+        let deactivated = self.deactivated_friends.read().await.clone();
 
         // 1. Direct F2F friends bound to addr
         {
             let friends = self.f2f_friends.read().await.clone();
             for (node_id, opt_addr) in friends {
-                if opt_addr.as_ref() == Some(addr) && !banned.contains(&node_id) {
+                if opt_addr.as_ref() == Some(addr)
+                    && !banned.contains(&node_id)
+                    && !deactivated.contains(&node_id)
+                {
                     expected.insert(node_id);
                 }
             }
@@ -3470,7 +3503,7 @@ impl PeerManager {
             if let Some(peer) = peers.get(addr) {
                 if peer.conn_type == PeerConnectionType::FriendToFriend {
                     if let Some(ref nid) = peer.node_id {
-                        if !banned.contains(nid) {
+                        if !banned.contains(nid) && !deactivated.contains(nid) {
                             expected.insert(*nid);
                         }
                     }
@@ -4284,15 +4317,41 @@ impl PeerManager {
         }
     }
 
-    /// Returns a snapshot of direct F2F friend public keys.
+    /// Returns a snapshot of direct F2F friend public keys (excluding deactivated edges).
     pub async fn f2f_friends_snapshot(&self) -> std::collections::HashSet<[u8; 32]> {
-        self.f2f_friends.read().await.keys().cloned().collect()
+        let friends = self.f2f_friends.read().await;
+        let deactivated = self.deactivated_friends.read().await;
+        friends
+            .keys()
+            .filter(|pk| !deactivated.contains(*pk))
+            .cloned()
+            .collect()
     }
 
     /// Prunes dormant known nodes that exceed their respective retention windows (Spec 07 §4 / INV-0705).
+    /// Deactivates direct friends inactive for > 1 year across authorization and transport targets.
     pub async fn prune_dormant_known_nodes(&self, now: Instant) {
         let friends = self.f2f_friends.read().await.clone();
         let now_ms = self.net_time_ms();
+        let mut expired_friends = Vec::new();
+        {
+            let nodes = self.known_network_nodes.read().await;
+            for (pk, info) in nodes.iter() {
+                if friends.contains_key(pk) {
+                    let elapsed_dur = now.saturating_duration_since(info.last_seen);
+                    let elapsed_ms = now_ms.saturating_sub(info.last_seen_ms);
+                    if elapsed_dur > DIRECT_FRIEND_RETENTION
+                        || (info.last_seen_ms > 0 && elapsed_ms > DIRECT_FRIEND_RETENTION_MS)
+                    {
+                        expired_friends.push(*pk);
+                    }
+                }
+            }
+        }
+        for pk in &expired_friends {
+            self.deactivate_f2f_friend_internal(pk, now_ms).await;
+        }
+
         let mut nodes = self.known_network_nodes.write().await;
         nodes.retain(|pk, info| {
             let is_friend = friends.contains_key(pk);
@@ -4312,6 +4371,84 @@ impl PeerManager {
         });
     }
 
+    /// Deactivates an expired direct F2F edge after 1 year of inactivity (Spec 07 §4 / INV-0705).
+    pub async fn deactivate_f2f_friend_internal(&self, pk: &[u8; 32], now_ms: u64) {
+        {
+            let mut deact = self.deactivated_friends.write().await;
+            deact.insert(*pk);
+        }
+        {
+            let mut peers = self.peers.write().await;
+            for peer in peers.values_mut() {
+                if peer.node_id.as_ref() == Some(pk) {
+                    peer.conn_type = PeerConnectionType::ShardDirect;
+                }
+            }
+        }
+        self.clock.revoke_peer_sample(pk);
+        let storage = self.storage.read().as_ref().and_then(|w| w.upgrade());
+        if let Some(storage) = storage {
+            let key = *pk;
+            let _ = tokio::task::spawn_blocking(move || {
+                storage.deactivate_f2f_edge(&key, now_ms)
+            })
+            .await;
+        }
+    }
+
+    /// Reactivates an expired direct F2F edge upon explicit local operator administration (Spec 07 §4 / INV-0705).
+    pub async fn reactivate_f2f_friend(&self, pk: &[u8; 32]) {
+        let was_deactivated = {
+            let mut deact = self.deactivated_friends.write().await;
+            deact.remove(pk)
+        };
+        if was_deactivated {
+            let storage = self.storage.read().as_ref().and_then(|w| w.upgrade());
+            if let Some(storage) = storage {
+                let key = *pk;
+                let _ = tokio::task::spawn_blocking(move || {
+                    storage.reactivate_f2f_edge(&key)
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Restores persisted deactivated direct F2F edges from storage.
+    pub async fn restore_deactivated_friends(
+        &self,
+        storage: &crate::storage::RedbStorage,
+    ) -> Result<usize, crate::error::NodeError> {
+        let deactivated = storage.all_deactivated_f2f_edges()?;
+        let count = self.import_persisted_deactivated_friends(&deactivated).await;
+        Ok(count)
+    }
+
+    /// Imports a list of deactivated F2F friend pubkeys into PeerManager.
+    pub async fn import_persisted_deactivated_friends(&self, keys: &[[u8; 32]]) -> usize {
+        let mut count = 0;
+        {
+            let mut deactivated = self.deactivated_friends.write().await;
+            for key in keys {
+                if deactivated.insert(*key) {
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            let deactivated = self.deactivated_friends.read().await;
+            let mut peers = self.peers.write().await;
+            for peer in peers.values_mut() {
+                if let Some(ref nid) = peer.node_id {
+                    if deactivated.contains(nid) {
+                        peer.conn_type = PeerConnectionType::ShardDirect;
+                    }
+                }
+            }
+        }
+        count
+    }
+
     /// Autonomous healing: decrements penalty counter of all registered peers by 1.
     pub async fn decay_all_peers(&self) {
         let mut peers = self.peers.write().await;
@@ -4328,9 +4465,14 @@ impl PeerManager {
     /// Returns all F2F friend addresses for the periodic heartbeat emitter.
     pub async fn f2f_peer_addrs(&self) -> Vec<SocketAddr> {
         let peers = self.peers.read().await;
+        let deactivated = self.deactivated_friends.read().await;
         peers
             .values()
-            .filter(|p| p.conn_type == PeerConnectionType::FriendToFriend)
+            .filter(|p| {
+                p.conn_type == PeerConnectionType::FriendToFriend
+                    && !p.is_suspended()
+                    && !p.node_id.as_ref().is_some_and(|pk| deactivated.contains(pk))
+            })
             .map(|p| p.addr)
             .collect()
     }
@@ -4339,9 +4481,12 @@ impl PeerManager {
     pub async fn all_f2f_target_addrs(&self) -> Vec<SocketAddr> {
         let mut addrs = self.f2f_peer_addrs().await;
         let friends = self.f2f_friends.read().await;
-        for a in friends.values().flatten() {
-            if !addrs.contains(a) {
-                addrs.push(*a);
+        let deactivated = self.deactivated_friends.read().await;
+        for (pk, opt_a) in friends.iter() {
+            if let Some(a) = opt_a {
+                if !deactivated.contains(pk) && !addrs.contains(a) {
+                    addrs.push(*a);
+                }
             }
         }
         addrs

@@ -136,6 +136,8 @@ pub const TABLE_INGRESS_ACCOUNTING: TableDefinition<u8, &[u8]> =
     TableDefinition::new("ingress_accounting_state");
 pub const TABLE_VIP_CREDENTIALS: TableDefinition<&[u8; 32], &[u8; 32]> =
     TableDefinition::new("vip_credentials");
+pub const TABLE_DEACTIVATED_F2F_EDGES: TableDefinition<&[u8; 32], u64> =
+    TableDefinition::new("deactivated_f2f_edges");
 
 /// Persisted VIP credential record mapping `(token_hash, account_tag)` (S05-12 / INV-1302).
 pub type VipCredentialRecord = ([u8; 32], [u8; 32]);
@@ -331,6 +333,7 @@ impl RedbStorage {
             let _ = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
             let _ = write_txn.open_table(TABLE_INGRESS_ACCOUNTING)?;
             let _ = write_txn.open_table(TABLE_VIP_CREDENTIALS)?;
+            let _ = write_txn.open_table(TABLE_DEACTIVATED_F2F_EDGES)?;
         }
         roots::initialize(&write_txn)?;
         let corrupt = signing::initialize(&write_txn, empty_database)?;
@@ -882,6 +885,54 @@ impl RedbStorage {
                 Ok(g) => g,
                 Err(err) => {
                     warn!("Corrupt entry in TABLE_BANNED_NODES iterator: {}", err);
+                    continue;
+                }
+            };
+            results.push(*k_guard.value());
+        }
+        Ok(results)
+    }
+
+    /// Deactivates a direct F2F edge after one year of inactivity (Spec 07 §4 / INV-0705).
+    pub fn deactivate_f2f_edge(&self, node_key: &[u8; 32], timestamp_ms: u64) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TABLE_DEACTIVATED_F2F_EDGES)?;
+            table.insert(node_key, timestamp_ms)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Checks if a direct F2F edge is currently deactivated.
+    pub fn is_f2f_edge_deactivated(&self, node_key: &[u8; 32]) -> Result<bool, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_DEACTIVATED_F2F_EDGES)?;
+        Ok(table.get(node_key)?.is_some())
+    }
+
+    /// Reactivates an expired direct F2F edge upon explicit local operator administration.
+    pub fn reactivate_f2f_edge(&self, node_key: &[u8; 32]) -> Result<bool, StorageError> {
+        let write_txn = self.db.begin_write()?;
+        let removed = {
+            let mut table = write_txn.open_table(TABLE_DEACTIVATED_F2F_EDGES)?;
+            let opt = table.remove(node_key)?;
+            opt.is_some()
+        };
+        write_txn.commit()?;
+        Ok(removed)
+    }
+
+    /// Returns all persisted deactivated direct F2F edge keys.
+    pub fn all_deactivated_f2f_edges(&self) -> Result<Vec<[u8; 32]>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_DEACTIVATED_F2F_EDGES)?;
+        let mut results = Vec::new();
+        for item in table.iter()? {
+            let (k_guard, _) = match item {
+                Ok(g) => g,
+                Err(err) => {
+                    warn!("Corrupt entry in TABLE_DEACTIVATED_F2F_EDGES iterator: {}", err);
                     continue;
                 }
             };
@@ -2151,6 +2202,14 @@ impl RedbStorage {
             for item in src_vip.iter()? {
                 let (k, v) = item?;
                 dst_vip.insert(k.value(), v.value())?;
+            }
+
+            // 8e. TABLE_DEACTIVATED_F2F_EDGES
+            let src_deact = read_txn.open_table(TABLE_DEACTIVATED_F2F_EDGES)?;
+            let mut dst_deact = write_txn.open_table(TABLE_DEACTIVATED_F2F_EDGES)?;
+            for item in src_deact.iter()? {
+                let (k, v) = item?;
+                dst_deact.insert(k.value(), v.value())?;
             }
 
             let support_src = read_txn.open_table(support::TABLE_CONFIRMATION_SUPPORT)?;

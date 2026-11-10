@@ -61,7 +61,7 @@ async fn test_s04_r1_heartbeat_ack_pow_outdated_f2f_barrier() {
     transport_c.spawn_accept_loop();
 
     // Node A knows Node C from network gossip (it is a shard peer, but NOT an F2F friend)
-    pm_a.learn_node_from_gossip(*identity_c.node_id(), addr_c, 1, None)
+    pm_a.learn_node_from_gossip_with_hrw(*identity_c.node_id(), *identity_c.hrw_routing_id(), addr_c, 1, None)
         .await;
 
     let conn_c_to_a = transport_c
@@ -223,8 +223,9 @@ async fn test_s04_r2_incomplete_uni_streams_do_not_starve_shard_or_sync_rpcs() {
     transport_b.spawn_accept_loop();
 
     // Authorize B so its connections are admitted
-    pm_a.learn_node_from_gossip(
+    pm_a.learn_node_from_gossip_with_hrw(
         *identity_b.node_id(),
+        *identity_b.hrw_routing_id(),
         "127.0.0.1:9091".parse().unwrap(),
         1,
         None,
@@ -275,9 +276,9 @@ async fn test_s04_r2_incomplete_uni_streams_do_not_starve_shard_or_sync_rpcs() {
     let addr_c = transport_c.local_addr().unwrap();
     transport_c.spawn_accept_loop();
 
-    pm_a.learn_node_from_gossip(*identity_c.node_id(), addr_c, 1, None)
+    pm_a.learn_node_from_gossip_with_hrw(*identity_c.node_id(), *identity_c.hrw_routing_id(), addr_c, 1, None)
         .await;
-    pm_c.learn_node_from_gossip(*identity_a.node_id(), addr_a, 1, None)
+    pm_c.learn_node_from_gossip_with_hrw(*identity_a.node_id(), *identity_a.hrw_routing_id(), addr_a, 1, None)
         .await;
 
     let conn_c_to_a = transport_c
@@ -1364,7 +1365,13 @@ async fn test_s04_16_zero_credit_refusal_cancellation_and_resource_release() {
 
         // Learn client via gossip initially so QUIC connection handshake is admitted
         pm_server
-            .learn_node_from_gossip(*identity_client.node_id(), "127.0.0.1:9099".parse().unwrap(), 0, None)
+            .learn_node_from_gossip_with_hrw(
+                *identity_client.node_id(),
+                *identity_client.hrw_routing_id(),
+                "127.0.0.1:9099".parse().unwrap(),
+                0,
+                None,
+            )
             .await;
 
         let conn = client_ep
@@ -1462,7 +1469,13 @@ async fn test_s04_16_zero_credit_refusal_deadline_expiry_and_resource_release() 
 
         // Learn client via gossip initially so QUIC connection handshake is admitted
         pm_server
-            .learn_node_from_gossip(*identity_client.node_id(), "127.0.0.1:9099".parse().unwrap(), 0, None)
+            .learn_node_from_gossip_with_hrw(
+                *identity_client.node_id(),
+                *identity_client.hrw_routing_id(),
+                "127.0.0.1:9099".parse().unwrap(),
+                0,
+                None,
+            )
             .await;
 
         let conn = client_ep
@@ -1561,7 +1574,13 @@ async fn test_s04_16_normal_credit_positive_control() {
 
     // 1. Branch 1: Gossip Refusal (learned via gossip, but not F2F friend)
     pm_server
-        .learn_node_from_gossip(*identity_client.node_id(), "127.0.0.1:9099".parse().unwrap(), 0, None)
+        .learn_node_from_gossip_with_hrw(
+            *identity_client.node_id(),
+            *identity_client.hrw_routing_id(),
+            "127.0.0.1:9099".parse().unwrap(),
+            0,
+            None,
+        )
         .await;
 
     let conn = client_ep
@@ -1588,7 +1607,13 @@ async fn test_s04_16_normal_credit_positive_control() {
     let identity_unknown = NodeIdentity::generate();
     let unknown_ep = normal_credit_client(&identity_unknown);
     pm_server
-        .learn_node_from_gossip(*identity_unknown.node_id(), "127.0.0.1:9098".parse().unwrap(), 0, None)
+        .learn_node_from_gossip_with_hrw(
+            *identity_unknown.node_id(),
+            *identity_unknown.hrw_routing_id(),
+            "127.0.0.1:9098".parse().unwrap(),
+            0,
+            None,
+        )
         .await;
     let unknown_conn = unknown_ep
         .connect(server_addr, humoco_node::network::transport::P2P_QUIC_SNI)

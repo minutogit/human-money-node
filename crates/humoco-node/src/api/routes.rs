@@ -4091,7 +4091,7 @@ mod local_capacity_collector_tests {
         let manager = Arc::new(crate::network::PeerManager::new(Vec::new()));
         manager.set_simulation_mode(true);
         manager
-            .learn_node_from_gossip(*peer.node_pubkey(), addr, 0, None)
+            .learn_node_from_gossip_with_hrw(*peer.node_pubkey(), *peer.hrw_routing_id(), addr, 0, None)
             .await;
         let cancel = tokio_util::sync::CancellationToken::new();
         let transport = crate::network::QuicTransport::bind_with_options(

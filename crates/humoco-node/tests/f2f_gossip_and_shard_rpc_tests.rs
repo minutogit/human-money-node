@@ -169,7 +169,7 @@ async fn test_f2f_gossip_and_shard_direct_contact_lifecycle() {
 
     // --- TEST 3: Direct Shard-RPC is authorized because A learned C via gossip ---
     // Node C also knows Node A from network gossip:
-    pm_c.learn_node_from_gossip(*identity_a.node_id(), actual_addr_a, 1, None)
+    pm_c.learn_node_from_gossip_with_hrw(*identity_a.node_id(), *identity_a.hrw_routing_id(), actual_addr_a, 1, None)
         .await;
 
     // A now connects directly to C (using connect_peer, which enforces the check)
@@ -314,7 +314,7 @@ async fn test_unauthorized_active_sync_and_shard_digest_rejected() {
     );
 
     // 3. Authorize C by registering it as a learned gossip node
-    pm_a.learn_node_from_gossip(*identity_c.node_id(), conn_c_to_a.remote_address(), 1, None)
+    pm_a.learn_node_from_gossip_with_hrw(*identity_c.node_id(), *identity_c.hrw_routing_id(), conn_c_to_a.remote_address(), 1, None)
         .await;
 
     // Now a fresh request on a new connection must succeed (no unauthorized).
@@ -526,7 +526,7 @@ async fn test_s04_01_connect_peer_identity_validation() {
     pm_b.register_f2f_friend(*identity_c.node_pubkey(), Some(addr_c)).await;
 
     // --- (a) Unknown B: Client C knows node A at server_addr, but B is completely unknown ---
-    pm_c.learn_node_from_gossip(*identity_a.node_pubkey(), server_addr, 0, None).await;
+    pm_c.learn_node_from_gossip_with_hrw(*identity_a.node_pubkey(), *identity_a.hrw_routing_id(), server_addr, 0, None).await;
 
     let res_a = transport_c.connect_peer(server_addr).await;
     assert!(
@@ -545,7 +545,7 @@ async fn test_s04_01_connect_peer_identity_validation() {
 
     // --- (b) Known-but-different B: Client C knows B at another address ---
     let other_addr: SocketAddr = "192.0.2.1:9090".parse().unwrap();
-    pm_c.learn_node_from_gossip(*identity_b.node_pubkey(), other_addr, 0, None).await;
+    pm_c.learn_node_from_gossip_with_hrw(*identity_b.node_pubkey(), *identity_b.hrw_routing_id(), other_addr, 0, None).await;
 
     let res_b = transport_c.connect_peer(server_addr).await;
     assert!(
@@ -595,7 +595,7 @@ async fn test_s04_01_connect_peer_identity_validation() {
     pm_a.register_f2f_friend(*identity_c.node_pubkey(), Some(addr_c)).await;
 
     // Client C learns A's updated address via signed heartbeat/gossip
-    pm_c.learn_node_from_gossip(*identity_a.node_pubkey(), migrated_addr_a, 0, None).await;
+    pm_c.learn_node_from_gossip_with_hrw(*identity_a.node_pubkey(), *identity_a.hrw_routing_id(), migrated_addr_a, 0, None).await;
 
     let res_d = transport_c.connect_peer(migrated_addr_a).await;
     assert!(
@@ -657,8 +657,8 @@ async fn test_s04_03_bidirectional_and_unidirectional_gossip_barrier() {
     transport_non_f2f.spawn_accept_loop();
 
     // Server learns non-f2f node via gossip (hops = 1), so direct RPC is authorized, but GOSSIP IS FORBIDDEN!
-    pm_s.learn_node_from_gossip(*non_f2f_id.node_pubkey(), non_f2f_addr, 1, None).await;
-    pm_non_f2f.learn_node_from_gossip(*server_id.node_pubkey(), server_addr, 0, None).await;
+    pm_s.learn_node_from_gossip_with_hrw(*non_f2f_id.node_pubkey(), *non_f2f_id.hrw_routing_id(), non_f2f_addr, 1, None).await;
+    pm_non_f2f.learn_node_from_gossip_with_hrw(*server_id.node_pubkey(), *server_id.hrw_routing_id(), server_addr, 0, None).await;
 
     let conn_non_f2f = transport_non_f2f.connect_peer(server_addr).await.expect("connect non-f2f to server");
 

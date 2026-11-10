@@ -596,7 +596,7 @@ async fn test_s06_01_initial_admission_requires_24h_age_and_eight_hourly_observa
 
     // Assert generic discovery / RPC calls do NOT inflate hourly heartbeat observations
     manager
-        .learn_node_from_gossip(*newcomer.node_pubkey(), addr, 0, None)
+        .learn_node_from_gossip_with_hrw(*newcomer.node_pubkey(), *newcomer.hrw_routing_id(), addr, 0, None)
         .await;
     manager
         .upsert_known_node(*newcomer.node_pubkey(), *newcomer.hrw_routing_id(), addr)

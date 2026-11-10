@@ -1542,3 +1542,265 @@ async fn test_s06_11_periodic_ticket_persistence_preserves_last_seen_and_retenti
     cancel2.cancel();
 }
 
+#[tokio::test]
+async fn test_s06_16_annual_friendship_expiry_deactivation_restart_and_reactivation() {
+    let cancel = CancellationToken::new();
+    let receiver_id = NodeIdentity::generate();
+    let expired_friend_id = NodeIdentity::generate();
+    let valid_friend_id = NodeIdentity::generate();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("f2f_test.redb");
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+
+    let receiver_pm = Arc::new(PeerManager::with_f2f(
+        vec![],
+        vec![*expired_friend_id.node_pubkey(), *valid_friend_id.node_pubkey()],
+    ));
+    receiver_pm.set_simulation_mode(true);
+    receiver_pm.set_storage(Arc::downgrade(&storage));
+
+    let receiver_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &receiver_id,
+        receiver_pm.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+    let receiver_addr = receiver_transport.local_addr().unwrap();
+    receiver_transport.spawn_accept_loop();
+
+    let expired_pm = Arc::new(PeerManager::with_f2f(vec![], vec![*receiver_id.node_pubkey()]));
+    expired_pm.set_simulation_mode(true);
+    let expired_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &expired_friend_id,
+        expired_pm.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+    let expired_addr = expired_transport.local_addr().unwrap();
+    expired_transport.spawn_accept_loop();
+
+    let valid_pm = Arc::new(PeerManager::with_f2f(vec![], vec![*receiver_id.node_pubkey()]));
+    valid_pm.set_simulation_mode(true);
+    let valid_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &valid_friend_id,
+        valid_pm.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+    let valid_addr = valid_transport.local_addr().unwrap();
+    valid_transport.spawn_accept_loop();
+
+    receiver_pm
+        .register_f2f_friend(*expired_friend_id.node_pubkey(), Some(expired_addr))
+        .await;
+    receiver_pm
+        .register_f2f_friend(*valid_friend_id.node_pubkey(), Some(valid_addr))
+        .await;
+    expired_pm
+        .register_f2f_friend(*receiver_id.node_pubkey(), Some(receiver_addr))
+        .await;
+    valid_pm
+        .register_f2f_friend(*receiver_id.node_pubkey(), Some(receiver_addr))
+        .await;
+
+    // Both peers learned
+    receiver_pm
+        .learn_node_from_gossip_with_hrw(
+            *expired_friend_id.node_pubkey(),
+            *expired_friend_id.hrw_routing_id(),
+            expired_addr,
+            0,
+            None,
+        )
+        .await;
+    receiver_pm
+        .learn_node_from_gossip_with_hrw(
+            *valid_friend_id.node_pubkey(),
+            *valid_friend_id.hrw_routing_id(),
+            valid_addr,
+            0,
+            None,
+        )
+        .await;
+
+    // Set Friend A inactive by > 365 days (366 days ago)
+    let one_year_plus = humoco_node::network::manager::DIRECT_FRIEND_RETENTION
+        + Duration::from_secs(86400);
+    receiver_pm
+        .set_last_seen_for_test(
+            expired_friend_id.node_pubkey(),
+            std::time::Instant::now() - one_year_plus,
+        )
+        .await;
+
+    // Control Friend B active (10 minutes ago)
+    receiver_pm
+        .set_last_seen_for_test(
+            valid_friend_id.node_pubkey(),
+            std::time::Instant::now() - Duration::from_secs(600),
+        )
+        .await;
+
+    // Prune dormant nodes
+    receiver_pm
+        .prune_dormant_known_nodes(std::time::Instant::now())
+        .await;
+
+    // S06-16 / INV-0705: Friend A must be DEACTIVATED across authorization
+    assert!(
+        !receiver_pm.is_f2f_friend(expired_friend_id.node_pubkey()).await,
+        "Expired friend >365 days must return is_f2f_friend == false"
+    );
+    assert!(
+        !receiver_pm
+            .can_accept_gossip(&expired_addr, Some(expired_friend_id.node_pubkey()))
+            .await,
+        "Expired friend edge must not accept gossip"
+    );
+    assert!(
+        !receiver_pm
+            .can_authorize_direct_rpc(&expired_addr, Some(expired_friend_id.node_pubkey()))
+            .await,
+        "Expired friend edge must not authorize direct RPC"
+    );
+
+    // Valid friend control must remain active
+    assert!(
+        receiver_pm.is_f2f_friend(valid_friend_id.node_pubkey()).await,
+        "Valid friend control must remain active"
+    );
+    assert!(
+        receiver_pm
+            .can_accept_gossip(&valid_addr, Some(valid_friend_id.node_pubkey()))
+            .await,
+        "Valid friend control must accept gossip"
+    );
+
+    // Real QUIC verification: Expired friend heartbeat must be rejected by Gossip Barrier
+    let expired_conn = expired_transport
+        .connect_peer_unchecked(receiver_addr)
+        .await
+        .unwrap();
+    let mut hb = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *expired_friend_id.node_pubkey(),
+        addr: expired_addr,
+        timestamp_ms: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: *expired_friend_id.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 1,
+    };
+    hb.sign_origin(
+        &expired_friend_id,
+        receiver_pm.net_time_ms(),
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let bytes = bincode::serialize(&hb).unwrap();
+    let mut header = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, bytes.len() as u32);
+    header.reserved = 1;
+    let _ = expired_transport
+        .send_unidirectional(&expired_conn, &header, &bytes)
+        .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Known node info for expired friend must not be learned from gossip
+    assert!(
+        receiver_pm
+            .get_known_node_info(expired_friend_id.node_pubkey())
+            .await
+            .is_none(),
+        "Expired friend heartbeat must be rejected and not re-learned via gossip"
+    );
+
+    // Valid friend heartbeat over real QUIC must succeed and update known node info
+    let valid_conn = valid_transport
+        .connect_peer_unchecked(receiver_addr)
+        .await
+        .unwrap();
+    let mut hb_valid = HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *valid_friend_id.node_pubkey(),
+        addr: valid_addr,
+        timestamp_ms: 0,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: *valid_friend_id.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 1,
+    };
+    hb_valid.sign_origin(
+        &valid_friend_id,
+        receiver_pm.net_time_ms(),
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let bytes_valid = bincode::serialize(&hb_valid).unwrap();
+    let mut header_valid =
+        WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, bytes_valid.len() as u32);
+    header_valid.reserved = 1;
+    let _ = valid_transport
+        .send_unidirectional(&valid_conn, &header_valid, &bytes_valid)
+        .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        receiver_pm
+            .get_known_node_info(valid_friend_id.node_pubkey())
+            .await
+            .is_some(),
+        "Valid friend heartbeat must be accepted over real QUIC"
+    );
+
+    // Restart test: create new PeerManager loading same storage with configured friend
+    let restarted_pm = Arc::new(PeerManager::with_f2f(
+        vec![(Some(*expired_friend_id.node_pubkey()), expired_addr)],
+        vec![*expired_friend_id.node_pubkey()],
+    ));
+    restarted_pm.set_simulation_mode(true);
+    let restored = restarted_pm.restore_deactivated_friends(&storage).await.unwrap();
+    assert!(restored >= 1);
+    assert!(
+        !restarted_pm.is_f2f_friend(expired_friend_id.node_pubkey()).await,
+        "Expired friend must remain deactivated after restart"
+    );
+
+    // Explicit operator reactivation:
+    receiver_pm
+        .register_f2f_friend(*expired_friend_id.node_pubkey(), Some(expired_addr))
+        .await;
+    assert!(
+        receiver_pm.is_f2f_friend(expired_friend_id.node_pubkey()).await,
+        "Friend must be active after explicit operator reactivation"
+    );
+    assert!(
+        receiver_pm
+            .can_accept_gossip(&expired_addr, Some(expired_friend_id.node_pubkey()))
+            .await,
+        "Gossip must be accepted after explicit reactivation"
+    );
+
+    cancel.cancel();
+    receiver_transport.close();
+    expired_transport.close();
+    valid_transport.close();
+    receiver_transport.drain_tasks().await;
+    expired_transport.drain_tasks().await;
+    valid_transport.drain_tasks().await;
+}
+

@@ -87,7 +87,15 @@ pub(crate) async fn recovery_peers_fault(
         });
     }
     for peer in &peers {
+        peer.manager.seed_local_ticket_age(
+            *peer.identity.node_pubkey(),
+            *peer.identity.hrw_routing_id(),
+            std::time::Duration::from_secs(25 * 3600),
+        );
         for member in &peers {
+            if member.identity.node_pubkey() == peer.identity.node_pubkey() {
+                continue;
+            }
             let addr = member.network.local_addr().unwrap();
             peer.manager
                 .register_f2f_friend(*member.identity.node_pubkey(), Some(addr))

@@ -576,6 +576,23 @@ impl NodeDaemon {
             dns_peers,
         ));
         peer_manager.set_simulation_mode(self.config.network.simulation_mode);
+        peer_manager.set_local_node_pubkey(*current_id.node_pubkey());
+        peer_manager.set_storage(std::sync::Arc::downgrade(&storage));
+
+        // Spec 07 §4 / INV-0705: load persisted deactivated direct F2F edges from redb
+        // BEFORE ticket restoration so previously expired friends remain deactivated,
+        // and any offline-expired friends are persisted before the network service starts.
+        let deactivated = storage.all_deactivated_f2f_edges()?;
+        if !deactivated.is_empty() {
+            let added = peer_manager
+                .import_persisted_deactivated_friends(&deactivated)
+                .await;
+            info!(
+                persisted = deactivated.len(),
+                imported = added,
+                "Loaded persisted deactivated F2F edges into PeerManager"
+            );
+        }
 
         // Restore persisted HRW ticket maturation timestamps from redb so restarts do not
         // reset 24h incubation across the cluster, while newly mined tickets still incubate.
@@ -584,16 +601,13 @@ impl NodeDaemon {
             let local_pk = *current_id.node_pubkey();
             let local_hrw = *current_id.hrw_routing_id();
             let sim_mode = self.config.network.simulation_mode;
-            let (local_prior_age, local_prior_qualified) = match peer_manager
-                .restore_persisted_ticket_observations(&storage, boot_now_ms, Some((local_pk, local_hrw)))
-                .await
-            {
-                Ok((age, qualified)) => (age, qualified),
-                Err(err) => {
-                    warn!(error = %err, "Failed to load persisted HRW ticket observations from redb");
-                    (std::time::Duration::ZERO, false)
-                }
-            };
+            let (local_prior_age, local_prior_qualified) = peer_manager
+                .restore_persisted_ticket_observations(
+                    &storage,
+                    boot_now_ms,
+                    Some((local_pk, local_hrw)),
+                )
+                .await?;
             if sim_mode || current_id.has_valid_pow_ticket() {
                 peer_manager.seed_local_ticket_age(local_pk, local_hrw, local_prior_age);
                 if let Err(err) =
@@ -620,26 +634,6 @@ impl NodeDaemon {
             }
             Err(err) => {
                 warn!(error = %err, "Failed to load persisted bans from redb; starting with empty ban set");
-            }
-        }
-
-        // Spec 07 §4 / INV-0705: load persisted deactivated direct F2F edges from redb
-        // so expired friends (>1 year dormancy) remain deactivated across restarts until operator reactivation.
-        match storage.all_deactivated_f2f_edges() {
-            Ok(deactivated) => {
-                if !deactivated.is_empty() {
-                    let added = peer_manager
-                        .import_persisted_deactivated_friends(&deactivated)
-                        .await;
-                    info!(
-                        persisted = deactivated.len(),
-                        imported = added,
-                        "Loaded persisted deactivated F2F edges into PeerManager"
-                    );
-                }
-            }
-            Err(err) => {
-                warn!(error = %err, "Failed to load deactivated F2F edges from redb");
             }
         }
 

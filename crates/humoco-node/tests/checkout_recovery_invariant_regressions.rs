@@ -1188,19 +1188,11 @@ async fn idempotent_variants_preserve_exact_entry_original_approval_digest_and_r
             std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
         )
         .await;
-        pm.learn_node_from_gossip_with_hrw(
+        pm.seed_local_ticket_age(
             *local_id.node_pubkey(),
             *local_id.hrw_routing_id(),
-            "127.0.0.1:1".parse().unwrap(),
-            0,
-            None,
-        )
-        .await;
-        pm.set_first_seen_for_test(
-            local_id.node_pubkey(),
-            std::time::Instant::now() - std::time::Duration::from_secs(25 * 3600),
-        )
-        .await;
+            std::time::Duration::from_secs(25 * 3600),
+        );
     }
 
     let ttl_s = root_expiry.saturating_sub(now_ms + 1) / 1000;

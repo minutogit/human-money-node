@@ -1804,3 +1804,293 @@ async fn test_s06_16_annual_friendship_expiry_deactivation_restart_and_reactivat
     valid_transport.drain_tasks().await;
 }
 
+#[tokio::test]
+async fn test_s06_17_offline_annual_expiry_deactivates_configured_friend_on_restart() {
+    let cancel = CancellationToken::new();
+    let receiver_id = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap()
+        .0;
+    let just_before_id = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap()
+        .0;
+    let exact_at_id = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap()
+        .0;
+    let just_beyond_id = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap()
+        .0;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("s06_17_offline_expiry.redb");
+    let boot_now_ms: u64 = 2_000_000_000_000;
+    let retention_ms = humoco_node::network::manager::DIRECT_FRIEND_RETENTION_MS;
+    let first_seen_ms = boot_now_ms - retention_ms - 10 * 86_400 * 1000;
+
+    // Persist observations BEFORE any deactivation record exists in storage.
+    {
+        let storage = RedbStorage::open(&db_path).unwrap();
+        storage
+            .record_ticket_observation_records(&[
+                (
+                    *just_before_id.node_pubkey(),
+                    *just_before_id.hrw_routing_id(),
+                    first_seen_ms,
+                    boot_now_ms - (retention_ms - 1),
+                    true,
+                ),
+                (
+                    *exact_at_id.node_pubkey(),
+                    *exact_at_id.hrw_routing_id(),
+                    first_seen_ms,
+                    boot_now_ms - retention_ms,
+                    true,
+                ),
+                (
+                    *just_beyond_id.node_pubkey(),
+                    *just_beyond_id.hrw_routing_id(),
+                    first_seen_ms,
+                    boot_now_ms - (retention_ms + 1),
+                    true,
+                ),
+            ])
+            .unwrap();
+        assert!(!storage
+            .is_f2f_edge_deactivated(just_beyond_id.node_pubkey())
+            .unwrap());
+    }
+
+    // Restart without any preexisting deactivation record.
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let receiver_pm = Arc::new(PeerManager::with_f2f(
+        vec![],
+        vec![
+            *just_before_id.node_pubkey(),
+            *exact_at_id.node_pubkey(),
+            *just_beyond_id.node_pubkey(),
+        ],
+    ));
+    receiver_pm.set_min_work_floor_for_test(1);
+    receiver_pm.set_storage(Arc::downgrade(&storage));
+    let current_net_ms = receiver_pm.net_time_ms();
+    if boot_now_ms > current_net_ms {
+        receiver_pm
+            .clock()
+            .advance_time_for_test(boot_now_ms - current_net_ms);
+    }
+
+    assert_eq!(
+        receiver_pm.restore_deactivated_friends(&storage).await.unwrap(),
+        0
+    );
+    receiver_pm
+        .restore_persisted_ticket_observations(&storage, boot_now_ms, None)
+        .await
+        .unwrap();
+
+    // Must be deactivated BEFORE gossip admission, persisted in storage, and NOT fraud-banned.
+    assert!(receiver_pm.is_f2f_friend(just_before_id.node_pubkey()).await);
+    assert!(receiver_pm.is_f2f_friend(exact_at_id.node_pubkey()).await);
+    assert!(
+        !receiver_pm.is_f2f_friend(just_beyond_id.node_pubkey()).await,
+        "Offline expiry (> DIRECT_FRIEND_RETENTION_MS) must deactivate configured friend on startup"
+    );
+    assert!(
+        !storage
+            .is_f2f_edge_deactivated(just_before_id.node_pubkey())
+            .unwrap(),
+        "Just-before boundary must not deactivate"
+    );
+    assert!(
+        !storage
+            .is_f2f_edge_deactivated(exact_at_id.node_pubkey())
+            .unwrap(),
+        "Exact-boundary must not deactivate"
+    );
+    assert!(
+        storage
+            .is_f2f_edge_deactivated(just_beyond_id.node_pubkey())
+            .unwrap(),
+        "Offline deactivation must be durably persisted in redb"
+    );
+    assert!(!receiver_pm.is_banned(just_beyond_id.node_pubkey()).await);
+
+    // Bind real QUIC transports and verify direct heartbeats with header.reserved = 0 (hops = 0).
+    let receiver_transport = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &receiver_id,
+        receiver_pm.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+    let receiver_addr = receiver_transport.local_addr().unwrap();
+    receiver_transport.spawn_accept_loop();
+
+    let mut friend_transports = Vec::new();
+    for friend_id in [&just_before_id, &exact_at_id, &just_beyond_id] {
+        let pm = Arc::new(PeerManager::with_f2f(vec![], vec![*receiver_id.node_pubkey()]));
+        pm.set_min_work_floor_for_test(1);
+        let t = QuicTransport::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            friend_id,
+            pm.clone(),
+            Arc::new(DefaultRequestHandler),
+            cancel.clone(),
+        )
+        .unwrap();
+        let addr = t.local_addr().unwrap();
+        t.spawn_accept_loop();
+        pm.register_f2f_friend(*receiver_id.node_pubkey(), Some(receiver_addr))
+            .await;
+        friend_transports.push((friend_id, pm, t, addr));
+    }
+
+    let send_direct_hb = |sender_transport: &QuicTransport,
+                          sender_id: &NodeIdentity,
+                          sender_addr: SocketAddr,
+                          seq: u64| {
+        let mut hb = HeartbeatWirePayload {
+            gateway_advertisement: None,
+            signing_checkpoint: None,
+            node_id: *sender_id.node_pubkey(),
+            addr: sender_addr,
+            timestamp_ms: boot_now_ms,
+            declared_write_ema_micro_bj: 0,
+            declared_read_ema_credits: 0,
+            signature: [0; 64],
+            supported_suites_mask: 0,
+            piggyback_observations: vec![],
+            pow_nonce: sender_id.nonce(),
+            hrw_routing_id: *sender_id.hrw_routing_id(),
+            ticket_epoch_t0: sender_id.t0(),
+            ttl: 1,
+        };
+        hb.sign_origin(
+            sender_id,
+            boot_now_ms,
+            humoco_sim_core::types::NetworkId::Mainnet,
+        );
+        let bytes = bincode::serialize(&hb).unwrap();
+        let mut hdr = WireHeader::new(MsgType::Heartbeat as u16, seq, 0, 0, bytes.len() as u32);
+        hdr.reserved = 0; // direct hop = 0
+        let t = sender_transport.clone();
+        async move {
+            let conn = t.connect_peer_unchecked(receiver_addr).await.unwrap();
+            let _ = t.send_unidirectional(&conn, &hdr, &bytes).await;
+        }
+    };
+
+    // None of the three are in known_network_nodes before QUIC delivery.
+    for (fid, _, _, _) in &friend_transports {
+        assert!(receiver_pm.get_known_node_info(fid.node_pubkey()).await.is_none());
+    }
+
+    // 1. Expired friend (> retention) must be rejected over real QUIC (header.reserved = 0)
+    let (_, _, beyond_t, beyond_addr) = &friend_transports[2];
+    assert!(
+        !receiver_pm
+            .can_accept_gossip(beyond_addr, Some(just_beyond_id.node_pubkey()))
+            .await
+    );
+    assert!(
+        !receiver_pm
+            .can_authorize_direct_rpc(beyond_addr, Some(just_beyond_id.node_pubkey()))
+            .await
+    );
+    send_direct_hb(beyond_t, &just_beyond_id, *beyond_addr, 1).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        receiver_pm
+            .get_known_node_info(just_beyond_id.node_pubkey())
+            .await
+            .is_none(),
+        "Deactivated friend direct heartbeat (hops=0) must be rejected"
+    );
+
+    // 2. Valid friend controls (just before & exact at) produce fresh observable state change
+    for (idx, label) in [(0usize, "just_before"), (1usize, "exact_at")] {
+        let (fid, _, ft, faddr) = &friend_transports[idx];
+        send_direct_hb(ft, fid, *faddr, 1).await;
+        let learned = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if receiver_pm
+                    .get_known_node_info(fid.node_pubkey())
+                    .await
+                    .is_some()
+                {
+                    break true;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            learned,
+            "Valid direct friend ({label}) heartbeat (hops=0) must produce fresh known_network_nodes state"
+        );
+    }
+
+    // 3. Persistence across another restart
+    let restarted_again = Arc::new(PeerManager::with_f2f(
+        vec![(Some(*just_beyond_id.node_pubkey()), *beyond_addr)],
+        vec![*just_beyond_id.node_pubkey()],
+    ));
+    assert!(
+        restarted_again
+            .restore_deactivated_friends(&storage)
+            .await
+            .unwrap()
+            >= 1
+    );
+    assert!(
+        !restarted_again
+            .is_f2f_friend(just_beyond_id.node_pubkey())
+            .await,
+        "Offline-deactivated friend must remain deactivated across subsequent restart"
+    );
+
+    // 4. Restoration only by explicit operator action
+    receiver_pm
+        .register_f2f_friend(*just_beyond_id.node_pubkey(), Some(*beyond_addr))
+        .await;
+    assert!(receiver_pm.is_f2f_friend(just_beyond_id.node_pubkey()).await);
+    assert!(
+        !storage
+            .is_f2f_edge_deactivated(just_beyond_id.node_pubkey())
+            .unwrap()
+    );
+    send_direct_hb(beyond_t, &just_beyond_id, *beyond_addr, 2).await;
+    let reactivated_learned = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if receiver_pm
+                .get_known_node_info(just_beyond_id.node_pubkey())
+                .await
+                .is_some()
+            {
+                break true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        reactivated_learned,
+        "Reactivated friend direct heartbeat (hops=0) must be accepted after explicit operator action"
+    );
+
+    cancel.cancel();
+    receiver_transport.close();
+    receiver_transport.drain_tasks().await;
+    for (_, _, ft, _) in friend_transports {
+        ft.close();
+        ft.drain_tasks().await;
+    }
+}
+
+

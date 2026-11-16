@@ -912,6 +912,8 @@ impl RedbStorage {
     }
 
     /// Reactivates an expired direct F2F edge upon explicit local operator administration.
+    /// Clears stale pre-deactivation ticket observations for `node_key` in the same transaction
+    /// so a restart prior to fresh heartbeats cannot immediately re-deactivate the friend.
     pub fn reactivate_f2f_edge(&self, node_key: &[u8; 32]) -> Result<bool, StorageError> {
         let write_txn = self.db.begin_write()?;
         let removed = {
@@ -919,6 +921,21 @@ impl RedbStorage {
             let opt = table.remove(node_key)?;
             opt.is_some()
         };
+        if removed {
+            let mut obs_table = write_txn.open_table(TABLE_TICKET_OBSERVATIONS)?;
+            let mut keys_to_delete = Vec::new();
+            for (k_guard, _) in obs_table.iter()?.flatten() {
+                let raw_key = k_guard.value();
+                if raw_key.len() == 64 && &raw_key[..32] == node_key {
+                    let mut key_arr = [0u8; 64];
+                    key_arr.copy_from_slice(raw_key);
+                    keys_to_delete.push(key_arr);
+                }
+            }
+            for k in keys_to_delete {
+                obs_table.remove(&k)?;
+            }
+        }
         write_txn.commit()?;
         Ok(removed)
     }

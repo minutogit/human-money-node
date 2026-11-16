@@ -786,6 +786,7 @@ pub struct PeerManager {
     /// (prevents gossip amplification loops) + echo protection basis.
     seen_fraud_proofs: Arc<tokio::sync::RwLock<HeartbeatDedupCache>>,
     known_active_shards: Arc<RwLock<std::collections::BTreeSet<u16>>>,
+    local_node_pubkey: Arc<parking_lot::RwLock<Option<[u8; 32]>>>,
     local_ticket_observation: LocalTicketObservation,
     persisted_ticket_ages: PersistedTicketAges,
     observed_votes: Arc<parking_lot::Mutex<ObservedVoteCache>>,
@@ -902,6 +903,7 @@ impl PeerManager {
             )),
             seen_heartbeats: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(10_000))),
             seen_fraud_proofs: Arc::new(tokio::sync::RwLock::new(HeartbeatDedupCache::new(1024))),
+            local_node_pubkey: Arc::new(parking_lot::RwLock::new(None)),
             local_ticket_observation: Arc::new(std::sync::Mutex::new(None)),
             persisted_ticket_ages: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             known_active_shards: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
@@ -922,6 +924,23 @@ impl PeerManager {
     pub fn set_simulation_mode(&self, enabled: bool) {
         self.simulation_mode
             .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Sets the explicit local NodePubKey so population counters and gossip handlers
+    /// never treat reflected self-presence as a distinct remote identity (S06-18).
+    pub fn set_local_node_pubkey(&self, pubkey: [u8; 32]) {
+        *self.local_node_pubkey.write() = Some(pubkey);
+    }
+
+    /// Returns the local NodePubKey if known from explicit wiring or local ticket observation.
+    pub fn local_node_pubkey(&self) -> Option<[u8; 32]> {
+        if let Some(pk) = *self.local_node_pubkey.read() {
+            return Some(pk);
+        }
+        self.local_ticket_observation
+            .lock()
+            .ok()
+            .and_then(|guard| guard.map(|(pk, _, _, _)| pk))
     }
 
     /// Returns true if simulation mode is active.
@@ -1503,6 +1522,7 @@ impl PeerManager {
         local_hrw: [u8; 32],
         prior_age: Duration,
     ) {
+        self.set_local_node_pubkey(local_pubkey);
         let is_shortcut = local_hrw == *blake3::hash(&local_pubkey).as_bytes()
             || local_hrw == local_pubkey
             || local_hrw == [0u8; 32];
@@ -1574,6 +1594,10 @@ impl PeerManager {
     }
 
     /// Restores persisted ticket observations from storage on startup.
+    ///
+    /// Classifies configured direct friendships before discarding expired observations:
+    /// if a friend's latest persisted observation exceeds `DIRECT_FRIEND_RETENTION_MS`,
+    /// deactivates and durably persists the deactivated edge prior to gossip admission (S06-17).
     pub async fn restore_persisted_ticket_observations(
         &self,
         storage: &crate::storage::RedbStorage,
@@ -1584,6 +1608,8 @@ impl PeerManager {
         let mut local_prior_qualified = false;
         let sim_mode = self.is_simulation_mode();
         let observations = storage.all_ticket_observations()?;
+        let mut latest_friend_last_seen: HashMap<[u8; 32], u64> = HashMap::new();
+
         for (pk, hrw, first_seen_ms, last_seen_ms, admission_qualified) in &observations {
             let is_shortcut = *hrw == *blake3::hash(pk).as_bytes()
                 || *hrw == *pk
@@ -1592,6 +1618,12 @@ impl PeerManager {
                 continue;
             }
             let is_direct_friend = self.is_f2f_friend(pk).await;
+            if is_direct_friend {
+                latest_friend_last_seen
+                    .entry(*pk)
+                    .and_modify(|prev| *prev = (*prev).max(*last_seen_ms))
+                    .or_insert(*last_seen_ms);
+            }
             let retention_ms = if is_direct_friend {
                 crate::network::manager::DIRECT_FRIEND_RETENTION_MS
             } else {
@@ -1624,6 +1656,27 @@ impl PeerManager {
                 }
             }
         }
+
+        // Deactivate configured friends whose latest observation crossed the 1-year retention
+        // threshold while offline (Spec 07 §4 / INV-0705 / S06-17).
+        for (friend_pk, max_last_seen_ms) in latest_friend_last_seen {
+            let elapsed_inactivity = boot_now_ms.saturating_sub(max_last_seen_ms);
+            if elapsed_inactivity > crate::network::manager::DIRECT_FRIEND_RETENTION_MS {
+                tracing::info!(
+                    node = %hex::encode(friend_pk),
+                    elapsed_ms = elapsed_inactivity,
+                    "Configured F2F friend crossed 1-year inactivity retention while offline; deactivating"
+                );
+                storage.deactivate_f2f_edge(&friend_pk, boot_now_ms)?;
+                self.apply_local_f2f_deactivation(&friend_pk).await;
+            }
+        }
+
+        // Prune expired observations so stale pre-deactivation records cannot trigger false
+        // re-deactivation on a later restart after explicit operator reactivation.
+        let active_friends = self.f2f_friends_snapshot().await;
+        storage.prune_dormant_ticket_observations(boot_now_ms, |pk| active_friends.contains(pk))?;
+
         if !observations.is_empty() {
             tracing::info!(
                 restored = observations.len(),
@@ -2810,6 +2863,13 @@ impl PeerManager {
         origin_authorized: bool,
         now: Instant,
     ) {
+        if self.local_node_pubkey() == Some(node_pubkey) && (hops > 0 || ingress_peer.is_some()) {
+            tracing::debug!(
+                node = %hex::encode(node_pubkey),
+                "Ignoring gossip announcement for local identity"
+            );
+            return;
+        }
         let (is_acceptable, _median) = self.is_ticket_acceptable(work_score);
         if !is_acceptable {
             return;
@@ -3751,29 +3811,37 @@ impl PeerManager {
             .collect()
     }
 
-    /// Mature, passively present admitted identities. RPC malus is diagnostic.
+    /// Mature, passively present admitted remote identities. RPC malus is diagnostic.
     pub async fn active_known_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
         let current_hour = self.net_time_ms() / 3_600_000;
+        let local_pk = self.local_node_pubkey();
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
         known
             .into_iter()
             .filter(|(pk, info)| {
-                info.is_hrw_eligible_at_hour(current_hour) && info.is_presence_fresh() && !banned.contains(pk)
+                local_pk != Some(*pk)
+                    && info.is_hrw_eligible_at_hour(current_hour)
+                    && info.is_presence_fresh()
+                    && !banned.contains(pk)
             })
             .map(|(pk, info)| (pk, info.addr))
             .collect()
     }
 
-    /// HRW tickets of the same qualified identity set used for committee selection.
+    /// HRW tickets of the same qualified remote identity set used for committee selection.
     pub async fn active_hrw_nodes(&self) -> Vec<([u8; 32], SocketAddr)> {
         let current_hour = self.net_time_ms() / 3_600_000;
+        let local_pk = self.local_node_pubkey();
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
         known
             .into_iter()
             .filter(|(pk, info)| {
-                info.is_hrw_eligible_at_hour(current_hour) && info.is_presence_fresh() && !banned.contains(pk)
+                local_pk != Some(*pk)
+                    && info.is_hrw_eligible_at_hour(current_hour)
+                    && info.is_presence_fresh()
+                    && !banned.contains(pk)
             })
             .map(|(_, info)| (info.hrw_routing_id, info.addr))
             .collect()
@@ -3838,30 +3906,35 @@ impl PeerManager {
                 && self_hrw != [0u8; 32]);
         let self_mature = if !self_has_valid_ticket {
             false
-        } else if let Some(info) = known.get(&self_pubkey) {
-            info.hrw_routing_id == self_hrw && info.is_hrw_eligible_at_hour(current_hour)
-        } else if let Ok(mut observation) = self.local_ticket_observation.lock() {
-            match *observation {
-                Some((pk, hrw, since, prior_age)) if pk == self_pubkey && hrw == self_hrw => {
-                    prior_age.saturating_add(since.elapsed()) >= required_incubation
-                }
-                _ => {
-                    let prior_state = self
-                        .persisted_ticket_ages
-                        .lock()
-                        .get(&(self_pubkey, self_hrw))
-                        .copied()
-                        .unwrap_or(PersistedTicketState {
-                            age: Duration::ZERO,
-                            admission_qualified: false,
-                            last_seen_ms: 0,
-                        });
-                    *observation = Some((self_pubkey, self_hrw, Instant::now(), prior_state.age));
-                    prior_state.age >= required_incubation
-                }
-            }
         } else {
-            false
+            let local_obs_mature = self.local_ticket_observation.lock().ok().and_then(|obs| {
+                match *obs {
+                    Some((pk, hrw, since, prior_age)) if pk == self_pubkey && hrw == self_hrw => {
+                        Some(prior_age.saturating_add(since.elapsed()) >= required_incubation)
+                    }
+                    _ => None,
+                }
+            });
+            if let Some(mature) = local_obs_mature {
+                mature
+            } else if let Some(info) = known.get(&self_pubkey) {
+                info.hrw_routing_id == self_hrw && info.is_hrw_eligible_at_hour(current_hour)
+            } else if let Ok(mut observation) = self.local_ticket_observation.lock() {
+                let prior_state = self
+                    .persisted_ticket_ages
+                    .lock()
+                    .get(&(self_pubkey, self_hrw))
+                    .copied()
+                    .unwrap_or(PersistedTicketState {
+                        age: Duration::ZERO,
+                        admission_qualified: false,
+                        last_seen_ms: 0,
+                    });
+                *observation = Some((self_pubkey, self_hrw, Instant::now(), prior_state.age));
+                prior_state.age >= required_incubation
+            } else {
+                false
+            }
         };
         if self_mature && !banned.contains(&self_pubkey) {
             members.push(CommitteeMember {
@@ -4204,6 +4277,49 @@ impl PeerManager {
         (write_median, read_median)
     }
 
+    fn count_eligible_known_nodes(
+        known: &HashMap<[u8; 32], KnownNodeInfo>,
+        banned: &HashSet<[u8; 32]>,
+        local_pk: Option<[u8; 32]>,
+        current_hour: u64,
+    ) -> usize {
+        known
+            .iter()
+            .filter(|(pk, info)| {
+                local_pk != Some(**pk)
+                    && info.is_hrw_eligible_at_hour(current_hour)
+                    && info.is_presence_fresh()
+                    && !banned.contains(*pk)
+            })
+            .count()
+    }
+
+    fn local_mature_unbanned(
+        &self,
+        known: &HashMap<[u8; 32], KnownNodeInfo>,
+        banned: &HashSet<[u8; 32]>,
+        local_pk: Option<[u8; 32]>,
+        current_hour: u64,
+    ) -> bool {
+        if local_pk.is_some_and(|pk| banned.contains(&pk)) {
+            return false;
+        }
+        let has_local_obs = self
+            .local_ticket_observation
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false);
+        if has_local_obs {
+            self.local_ticket_is_mature()
+        } else {
+            local_pk.is_some_and(|pk| {
+                known.get(&pk).is_some_and(|info| {
+                    info.is_hrw_eligible_at_hour(current_hour) && info.is_presence_fresh()
+                })
+            })
+        }
+    }
+
     /// Best-effort nonblocking size using mature passive presence, never RPC malus.
     pub fn active_nodes_count(&self) -> usize {
         let Ok(known) = self.known_network_nodes.try_read() else {
@@ -4213,18 +4329,21 @@ impl PeerManager {
             return 0;
         };
         let current_hour = self.net_time_ms() / 3_600_000;
-        let remote_count = known
-            .iter()
-            .filter(|(pk, info)| {
-                info.is_hrw_eligible_at_hour(current_hour) && info.is_presence_fresh() && !banned.contains(*pk)
-            })
-            .count();
-        remote_count + usize::from(self.local_ticket_is_mature())
+        let local_pk = self.local_node_pubkey();
+        let remote_count = Self::count_eligible_known_nodes(&known, &banned, local_pk, current_hour);
+        remote_count
+            + usize::from(self.local_mature_unbanned(&known, &banned, local_pk, current_hour))
     }
 
     /// Same eligibility policy as the frozen committee; connectivity is not a ticket.
     pub async fn mature_network_size(&self) -> usize {
-        self.active_known_nodes().await.len() + usize::from(self.local_ticket_is_mature())
+        let current_hour = self.net_time_ms() / 3_600_000;
+        let known = self.known_network_nodes.read().await.clone();
+        let banned = self.banned_nodes.read().await.clone();
+        let local_pk = self.local_node_pubkey();
+        let remote_count = Self::count_eligible_known_nodes(&known, &banned, local_pk, current_hour);
+        remote_count
+            + usize::from(self.local_mature_unbanned(&known, &banned, local_pk, current_hour))
     }
 
     /// Diagnostic merge detection includes immature identities with fresh gossip.
@@ -4232,11 +4351,15 @@ impl PeerManager {
     pub async fn total_network_size(&self) -> usize {
         let known = self.known_network_nodes.read().await.clone();
         let banned = self.banned_nodes.read().await.clone();
-        known
+        let local_pk = self.local_node_pubkey();
+        let remote_count = known
             .iter()
-            .filter(|(pk, info)| info.is_presence_fresh() && !banned.contains(*pk))
-            .count()
-            + 1
+            .filter(|(pk, info)| {
+                local_pk != Some(**pk) && info.is_presence_fresh() && !banned.contains(*pk)
+            })
+            .count();
+        let local_unbanned = !local_pk.is_some_and(|pk| banned.contains(&pk));
+        remote_count + usize::from(local_unbanned)
     }
 
     /// Pure merge-jump predicate (Spec 09 INV-0908): abrupt growth detection.
@@ -4371,8 +4494,7 @@ impl PeerManager {
         });
     }
 
-    /// Deactivates an expired direct F2F edge after 1 year of inactivity (Spec 07 §4 / INV-0705).
-    pub async fn deactivate_f2f_friend_internal(&self, pk: &[u8; 32], now_ms: u64) {
+    async fn apply_local_f2f_deactivation(&self, pk: &[u8; 32]) {
         {
             let mut deact = self.deactivated_friends.write().await;
             deact.insert(*pk);
@@ -4386,13 +4508,24 @@ impl PeerManager {
             }
         }
         self.clock.revoke_peer_sample(pk);
+    }
+
+    /// Deactivates an expired direct F2F edge after 1 year of inactivity (Spec 07 §4 / INV-0705).
+    pub async fn deactivate_f2f_friend_internal(&self, pk: &[u8; 32], now_ms: u64) {
+        self.apply_local_f2f_deactivation(pk).await;
         let storage = self.storage.read().as_ref().and_then(|w| w.upgrade());
         if let Some(storage) = storage {
             let key = *pk;
-            let _ = tokio::task::spawn_blocking(move || {
-                storage.deactivate_f2f_edge(&key, now_ms)
-            })
-            .await;
+            match tokio::task::spawn_blocking(move || storage.deactivate_f2f_edge(&key, now_ms)).await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(node = %hex::encode(pk), error = %err, "Failed to persist F2F edge deactivation");
+                }
+                Err(err) => {
+                    tracing::warn!(node = %hex::encode(pk), error = %err, "Failed to join F2F edge deactivation persist task");
+                }
+            }
         }
     }
 

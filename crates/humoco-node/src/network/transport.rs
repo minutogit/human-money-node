@@ -289,6 +289,7 @@ impl NodeRequestHandler {
     ) -> Self {
         peer_manager.set_storage(Arc::downgrade(&storage));
         peer_manager.set_engine(&engine);
+        peer_manager.set_local_node_pubkey(*identity.node_pubkey());
         let clock = peer_manager.clock().clone();
         Self {
             engine,
@@ -2709,6 +2710,7 @@ impl QuicTransport {
 
         endpoint.set_default_client_config(client_config);
         peer_manager.set_endpoint(endpoint.clone());
+        peer_manager.set_local_node_pubkey(*identity.node_pubkey());
 
         let (fraud_tx, mut fraud_rx) =
             tokio::sync::mpsc::channel::<crate::network::manager::FraudProofForwardMsg>(100);
@@ -4358,6 +4360,13 @@ impl QuicTransport {
                                                         }
 
                                                         let node_id = hb.node_id;
+                                                        if node_id == *transport_clone.identity.node_pubkey() {
+                                                            debug!(
+                                                                node = %hex::encode(node_id),
+                                                                "GOSSIP BARRIER: Ignored reflected self heartbeat"
+                                                            );
+                                                            return;
+                                                        }
                                                         if pm.is_banned(&node_id).await {
                                                             warn!(node = %hex::encode(node_id), "GOSSIP BARRIER: Dropped heartbeat from banned node");
                                                             return;

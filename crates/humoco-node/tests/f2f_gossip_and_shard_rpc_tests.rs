@@ -1750,5 +1750,336 @@ async fn test_s06_08_authenticated_relay_endpoint_update_over_real_quic() {
     cancel_rel.cancel();
 }
 
+#[tokio::test]
+async fn test_s06_18_relayed_self_heartbeat_does_not_double_count_population() {
+    use humoco_node::identity::NodeIdentity;
+    use humoco_node::network::{DefaultRequestHandler, QuicTransport};
+    use humoco_sim_core::wire::{MsgType, WireHeader};
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+
+    let cancel = CancellationToken::new();
+    let self_id = NodeIdentity::generate();
+    let friend_id = NodeIdentity::generate();
+    let newcomer_remote = NodeIdentity::generate();
+
+    let pm_self = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*friend_id.node_pubkey()],
+    ));
+    pm_self.set_simulation_mode(true);
+    pm_self.set_local_sync_ready(true);
+    pm_self.seed_local_ticket_age(
+        *self_id.node_pubkey(),
+        *self_id.hrw_routing_id(),
+        Duration::from_secs(25 * 3600),
+    );
+
+    let pm_friend = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*self_id.node_pubkey()],
+    ));
+    pm_friend.set_simulation_mode(true);
+
+    let transport_self = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &self_id,
+        pm_self.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind self");
+    let addr_self = transport_self.local_addr().unwrap();
+    transport_self.spawn_accept_loop();
+
+    let transport_friend = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &friend_id,
+        pm_friend.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .expect("bind friend");
+    let addr_friend = transport_friend.local_addr().unwrap();
+    transport_friend.spawn_accept_loop();
+
+    pm_self
+        .register_f2f_friend(*friend_id.node_pubkey(), Some(addr_friend))
+        .await;
+    pm_friend
+        .register_f2f_friend(*self_id.node_pubkey(), Some(addr_self))
+        .await;
+
+    // Seed 18 mature remote identities (friend + 17 others) so total unique mature nodes = 19.
+    let now_ms = pm_self.net_time_ms();
+    let mature_first_seen = Instant::now() - Duration::from_secs(25 * 3600);
+    let mut remote_identities = vec![(*friend_id.node_pubkey(), *friend_id.hrw_routing_id(), addr_friend)];
+    for i in 0..17u16 {
+        let rid = NodeIdentity::generate();
+        let raddr: SocketAddr = format!("127.0.0.1:{}", 38000 + i).parse().unwrap();
+        remote_identities.push((*rid.node_pubkey(), *rid.hrw_routing_id(), raddr));
+    }
+    for (pk, hrw, raddr) in &remote_identities {
+        pm_self
+            .learn_node_from_gossip_with_hrw(*pk, *hrw, *raddr, 1, None)
+            .await;
+        pm_self.set_first_seen_for_test(pk, mature_first_seen).await;
+        for h in 0..8u64 {
+            pm_self
+                .record_heartbeat_hourly_observation(*pk, *hrw, now_ms.saturating_sub(h * 3_600_000))
+                .await;
+        }
+    }
+
+    assert_eq!(pm_self.active_nodes_count(), 19);
+    assert_eq!(pm_self.mature_network_size().await, 19);
+    assert_eq!(pm_self.total_network_size().await, 19);
+    assert_eq!(
+        pm_self
+            .shard_committee(*self_id.node_pubkey(), *self_id.hrw_routing_id(), 1)
+            .await
+            .2,
+        19
+    );
+
+    // Friend reflects self's genuine origin-signed heartbeat back to self with hops = 1 over real QUIC.
+    let conn = transport_friend
+        .connect_peer_unchecked(addr_self)
+        .await
+        .expect("friend connect self");
+    let mut hb_reflected_self = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *self_id.node_pubkey(),
+        addr: addr_self,
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: *self_id.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 1,
+    };
+    hb_reflected_self.sign_origin(
+        &self_id,
+        now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let bytes_self = bincode::serialize(&hb_reflected_self).unwrap();
+    let mut hdr_self = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, bytes_self.len() as u32);
+    hdr_self.reserved = 1; // hops = 1
+    transport_friend
+        .send_unidirectional(&conn, &hdr_self, &bytes_self)
+        .await
+        .expect("send reflected self heartbeat");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert!(
+        !pm_self.is_known_node(self_id.node_pubkey()).await,
+        "Reflected self heartbeat must not insert local identity into known_network_nodes"
+    );
+    assert_eq!(pm_self.active_nodes_count(), 19);
+    assert_eq!(pm_self.mature_network_size().await, 19);
+    assert_eq!(pm_self.total_network_size().await, 19);
+    assert_eq!(
+        pm_self
+            .shard_committee(*self_id.node_pubkey(), *self_id.hrw_routing_id(), 1)
+            .await
+            .2,
+        19
+    );
+
+    // N >= 20 stability gate must stay false even after controlled 24h advance.
+    assert!(!pm_self.is_network_stable_ge20_for_24h(now_ms));
+    assert!(!pm_self.is_network_stable_ge20_for_24h(now_ms + 86_400_001));
+
+    // Ordinary remote announcement control over the same authenticated friend QUIC link must still learn.
+    let newcomer_addr: SocketAddr = "127.0.0.1:38999".parse().unwrap();
+    let mut hb_remote = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *newcomer_remote.node_pubkey(),
+        addr: newcomer_addr,
+        timestamp_ms: now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: 0,
+        hrw_routing_id: *newcomer_remote.hrw_routing_id(),
+        ticket_epoch_t0: 0,
+        ttl: 1,
+    };
+    hb_remote.sign_origin(
+        &newcomer_remote,
+        now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let bytes_remote = bincode::serialize(&hb_remote).unwrap();
+    let mut hdr_remote = WireHeader::new(MsgType::Heartbeat as u16, 2, 0, 0, bytes_remote.len() as u32);
+    hdr_remote.reserved = 1;
+    transport_friend
+        .send_unidirectional(&conn, &hdr_remote, &bytes_remote)
+        .await
+        .expect("send ordinary remote heartbeat");
+
+    let learned_remote = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if pm_self.is_known_node(newcomer_remote.node_pubkey()).await {
+                break true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(learned_remote, "Ordinary remote heartbeat must still be learned");
+    assert_eq!(pm_self.active_nodes_count(), 19, "Immature remote must not inflate active count");
+    assert_eq!(pm_self.mature_network_size().await, 19);
+    assert_eq!(pm_self.total_network_size().await, 20, "Immature remote increases total_network_size");
+
+    // Immature self control: local ticket with 0 age in production incubation regime.
+    let (self_immature_id, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap();
+    let (friend_imm_id, _) = NodeIdentity::generate()
+        .mine_ticket(1, 1_700_000_000, Some(50))
+        .unwrap();
+    let pm_imm = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*friend_imm_id.node_pubkey()],
+    ));
+    pm_imm.set_min_work_floor_for_test(1);
+    pm_imm.seed_local_ticket_age(
+        *self_immature_id.node_pubkey(),
+        *self_immature_id.hrw_routing_id(),
+        Duration::ZERO,
+    );
+    let pm_friend_imm = Arc::new(PeerManager::with_f2f(
+        Vec::new(),
+        vec![*self_immature_id.node_pubkey()],
+    ));
+    let t_imm = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &self_immature_id,
+        pm_imm.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+    let addr_imm = t_imm.local_addr().unwrap();
+    t_imm.spawn_accept_loop();
+    let t_friend_imm = QuicTransport::bind_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        &friend_imm_id,
+        pm_friend_imm.clone(),
+        Arc::new(DefaultRequestHandler),
+        cancel.clone(),
+    )
+    .unwrap();
+    let addr_friend_imm = t_friend_imm.local_addr().unwrap();
+    t_friend_imm.spawn_accept_loop();
+    pm_imm
+        .register_f2f_friend(*friend_imm_id.node_pubkey(), Some(addr_friend_imm))
+        .await;
+    pm_friend_imm
+        .register_f2f_friend(*self_immature_id.node_pubkey(), Some(addr_imm))
+        .await;
+
+    let imm_now_ms = pm_imm.net_time_ms();
+    for i in 0..18u16 {
+        let (rid, _) = if i == 0 {
+            (friend_imm_id.clone(), 0)
+        } else {
+            NodeIdentity::generate()
+                .mine_ticket(1, 1_700_000_000, Some(50))
+                .unwrap()
+        };
+        let raddr: SocketAddr = format!("127.0.0.1:{}", 39100 + i).parse().unwrap();
+        pm_imm
+            .learn_node_from_gossip_with_hrw_work_and_auth(
+                *rid.node_pubkey(),
+                *rid.hrw_routing_id(),
+                raddr,
+                1,
+                None,
+                rid.work_score().max(1),
+                true,
+            )
+            .await;
+        pm_imm.set_first_seen_for_test(rid.node_pubkey(), mature_first_seen).await;
+        for h in 0..8u64 {
+            pm_imm
+                .record_heartbeat_hourly_observation(
+                    *rid.node_pubkey(),
+                    *rid.hrw_routing_id(),
+                    imm_now_ms.saturating_sub(h * 3_600_000),
+                )
+                .await;
+        }
+    }
+    assert_eq!(pm_imm.active_nodes_count(), 18);
+    assert_eq!(pm_imm.mature_network_size().await, 18);
+    assert_eq!(pm_imm.total_network_size().await, 19);
+
+    let conn_imm = t_friend_imm.connect_peer_unchecked(addr_imm).await.unwrap();
+    let mut hb_imm_self = humoco_node::network::framing::HeartbeatWirePayload {
+        gateway_advertisement: None,
+        signing_checkpoint: None,
+        node_id: *self_immature_id.node_pubkey(),
+        addr: addr_imm,
+        timestamp_ms: imm_now_ms,
+        declared_write_ema_micro_bj: 0,
+        declared_read_ema_credits: 0,
+        signature: [0u8; 64],
+        supported_suites_mask: 0,
+        piggyback_observations: vec![],
+        pow_nonce: self_immature_id.nonce(),
+        hrw_routing_id: *self_immature_id.hrw_routing_id(),
+        ticket_epoch_t0: self_immature_id.t0(),
+        ttl: 1,
+    };
+    hb_imm_self.sign_origin(
+        &self_immature_id,
+        imm_now_ms,
+        humoco_sim_core::types::NetworkId::Mainnet,
+    );
+    let bytes_imm = bincode::serialize(&hb_imm_self).unwrap();
+    let mut hdr_imm = WireHeader::new(MsgType::Heartbeat as u16, 1, 0, 0, bytes_imm.len() as u32);
+    hdr_imm.reserved = 1;
+    t_friend_imm
+        .send_unidirectional(&conn_imm, &hdr_imm, &bytes_imm)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert!(!pm_imm.is_known_node(self_immature_id.node_pubkey()).await);
+    assert_eq!(pm_imm.active_nodes_count(), 18);
+    assert_eq!(pm_imm.mature_network_size().await, 18);
+    assert_eq!(pm_imm.total_network_size().await, 19);
+    assert_eq!(
+        pm_imm
+            .shard_committee(
+                *self_immature_id.node_pubkey(),
+                *self_immature_id.hrw_routing_id(),
+                1
+            )
+            .await
+            .2,
+        18
+    );
+
+    cancel.cancel();
+    transport_self.close();
+    transport_friend.close();
+    t_imm.close();
+    t_friend_imm.close();
+}
+
+
 
 

@@ -21,6 +21,23 @@ pub enum IngressTier {
     Tier3Public,
 }
 
+#[derive(Debug, Clone)]
+enum ValidatedTierCredential {
+    Vip { account_tag: [u8; 32] },
+    F2f { token_trimmed: String },
+    Public,
+}
+
+impl ValidatedTierCredential {
+    fn tier(&self) -> IngressTier {
+        match self {
+            Self::Vip { .. } => IngressTier::Tier1Vip,
+            Self::F2f { .. } => IngressTier::Tier2F2F,
+            Self::Public => IngressTier::Tier3Public,
+        }
+    }
+}
+
 /// DTO for registered F2F ingress client credentials.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct F2fClientDto {
@@ -1553,6 +1570,100 @@ impl TierController {
         .await
     }
 
+    /// Validates tier credentials or stateless PoW purely in memory without debiting VIP credits,
+    /// consuming rolling quota, mutating client activity timestamps, or performing disk I/O (S05-20).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn validate_credentials_with_time(
+        &self,
+        auth_token: Option<&str>,
+        peer_token: Option<&str>,
+        pow_challenge: Option<&str>,
+        pow_nonce: Option<u64>,
+        parent_lock: Option<&[u8; 32]>,
+        now_ms: Option<u64>,
+    ) -> Result<IngressTier, IngressError> {
+        let validated = self
+            .validate_tier_credentials_with_time(
+                auth_token,
+                peer_token,
+                pow_challenge,
+                pow_nonce,
+                parent_lock,
+                now_ms,
+            )
+            .await?;
+        Ok(validated.tier())
+    }
+
+    async fn validate_tier_credentials_with_time(
+        &self,
+        auth_token: Option<&str>,
+        peer_token: Option<&str>,
+        pow_challenge: Option<&str>,
+        pow_nonce: Option<u64>,
+        parent_lock: Option<&[u8; 32]>,
+        now_ms: Option<u64>,
+    ) -> Result<ValidatedTierCredential, IngressError> {
+        // 1. Tier 1 (VIP) - pure RAM hash lookup
+        if let Some(token) = auth_token {
+            let account_tag = self.resolve_account_tag(token)?;
+            return Ok(ValidatedTierCredential::Vip { account_tag });
+        }
+
+        // 2. Tier 2 (F2F Peer) - pure RAM token set check
+        if let Some(token) = peer_token {
+            let token_trimmed = token.trim();
+            let is_valid = self
+                .f2f_tokens
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(token_trimmed);
+            if !is_valid {
+                return Err(IngressError::InvalidPeerToken);
+            }
+            return Ok(ValidatedTierCredential::F2f {
+                token_trimmed: token_trimmed.to_string(),
+            });
+        }
+
+        // 3. Tier 3 (Public - Stateless BLAKE3 PoW)
+        if self.pow_engine.default_difficulty() == 0 {
+            return Ok(ValidatedTierCredential::Public);
+        }
+
+        let eff_now_ms = self.effective_now_ms(now_ms);
+        let now_sec = eff_now_ms / 1000;
+        let load_factor = (self.rolling_24h_average_at(now_sec) as f64
+            / self.effective_ncb().max(1) as f64)
+            .clamp(0.0, 1.0);
+        let dynamic_difficulty = self.pow_engine.required_difficulty_for_load(load_factor);
+
+        match (pow_challenge, pow_nonce) {
+            (Some(challenge), Some(nonce)) => {
+                self.pow_engine
+                    .verify_pow_for_parent_at(
+                        challenge,
+                        nonce,
+                        dynamic_difficulty,
+                        parent_lock,
+                        now_sec,
+                    )
+                    .await?;
+                Ok(ValidatedTierCredential::Public)
+            }
+            _ => {
+                let p = parent_lock.copied().unwrap_or([0u8; 32]);
+                let (challenge, _, expires_at) =
+                    self.pow_engine.generate_challenge_for_parent_at(&p, now_sec);
+                Err(IngressError::PoWRequired {
+                    challenge,
+                    difficulty: dynamic_difficulty,
+                    expires_at,
+                })
+            }
+        }
+    }
+
     /// [INV-0929] Evaluates tier credentials with decentralized network time, validates authorization,
     /// deducts quota (for VIP non-retries), or validates PoW (for Public).
     /// When `is_retry` is true, validates credentials and rate admission without double-charging storage or daily writes.
@@ -1572,164 +1683,117 @@ impl TierController {
         let now_sec = eff_now_ms / 1000;
         let footprint_micro_bj = charge.micro_byte_years;
 
-        // 1. Check Tier 1 (VIP) - in-memory atomic cache, no synchronous fsync stall (INV-0929 hot-path)
-        if let Some(token) = auth_token {
-            let account_tag = self.resolve_account_tag(token)?;
+        let validated = self
+            .validate_tier_credentials_with_time(
+                auth_token,
+                peer_token,
+                pow_challenge,
+                pow_nonce,
+                parent_lock,
+                Some(eff_now_ms),
+            )
+            .await?;
 
-            if is_retry {
-                return Ok(IngressTier::Tier1Vip);
-            }
+        match validated {
+            ValidatedTierCredential::Vip { account_tag } => {
+                if is_retry {
+                    return Ok(IngressTier::Tier1Vip);
+                }
 
-            if self.vip_persist_failed.load(Ordering::Acquire) {
-                return Err(IngressError::QuotaPersistenceUnavailable);
-            }
+                if self.vip_persist_failed.load(Ordering::Acquire) {
+                    return Err(IngressError::QuotaPersistenceUnavailable);
+                }
 
-            // Hydrate cold miss asynchronously before acquiring write lock (A05-01)
-            self.ensure_vip_quota_cached(&account_tag).await?;
+                // Hydrate cold miss asynchronously before acquiring write lock (A05-01)
+                self.ensure_vip_quota_cached(&account_tag).await?;
 
-            let required_byte_years = charge.byte_years;
-            let daily_quota = self.calculate_daily_quota(5.0, 1.0);
+                let required_byte_years = charge.byte_years;
+                let daily_quota = self.calculate_daily_quota(5.0, 1.0);
 
-            // 1. Check daily rolling quota using candidate counter
-            let mut vip_usage = self
-                .vip_rolling_usage
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let counter = vip_usage.entry(account_tag).or_default();
-            let mut candidate_counter = *counter;
-            candidate_counter
-                .try_consume(now_sec, required_byte_years, daily_quota)
-                .map_err(|available| IngressError::QuotaExceeded {
-                    available,
-                    required: required_byte_years,
-                })?;
+                // 1. Check daily rolling quota using candidate counter
+                let mut vip_usage = self
+                    .vip_rolling_usage
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let counter = vip_usage.entry(account_tag).or_default();
+                let mut candidate_counter = *counter;
+                candidate_counter
+                    .try_consume(now_sec, required_byte_years, daily_quota)
+                    .map_err(|available| IngressError::QuotaExceeded {
+                        available,
+                        required: required_byte_years,
+                    })?;
 
-            // 2. Check purchased credit balance in RAM cache
-            let mut cache = self.vip_quota_cache.write();
-            let bal = cache.entry(account_tag).or_insert(0);
-            if *bal < required_byte_years {
-                return Err(IngressError::QuotaExceeded {
-                    available: *bal,
-                    required: required_byte_years,
+                // 2. Check purchased credit balance in RAM cache
+                let mut cache = self.vip_quota_cache.write();
+                let bal = cache.entry(account_tag).or_insert(0);
+                if *bal < required_byte_years {
+                    return Err(IngressError::QuotaExceeded {
+                        available: *bal,
+                        required: required_byte_years,
+                    });
+                }
+
+                // 3. Reserve persistence capacity BEFORE mutating RAM balance
+                let permit = self
+                    .vip_persist_tx
+                    .try_reserve()
+                    .map_err(|_| IngressError::QuotaPersistenceUnavailable)?;
+
+                // 4. All checks passed! Apply all mutations atomically with zero partial state on errors
+                *bal = bal.saturating_sub(required_byte_years);
+                let remaining = *bal;
+                permit.send(VipQuotaPersistOp {
+                    account_tag,
+                    remaining,
                 });
+                drop(cache);
+
+                *counter = candidate_counter;
+                drop(vip_usage);
+
+                self.vip_writes_today.fetch_add(1, Ordering::Relaxed);
+                self.thermometer
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_write_ingress(now_sec, footprint_micro_bj);
+
+                Ok(IngressTier::Tier1Vip)
             }
+            ValidatedTierCredential::F2f { token_trimmed } => {
+                let token_hash = compute_friends_token_hash(&token_trimmed);
+                let token_hash_hex = hex::encode(token_hash);
+                if let Some(meta) = self
+                    .f2f_clients
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_mut(&token_hash_hex)
+                {
+                    meta.last_active_ms = Some(eff_now_ms);
+                }
 
-            // 3. Reserve persistence capacity BEFORE mutating RAM balance
-            let permit = self
-                .vip_persist_tx
-                .try_reserve()
-                .map_err(|_| IngressError::QuotaPersistenceUnavailable)?;
+                if is_retry {
+                    return Ok(IngressTier::Tier2F2F);
+                }
 
-            // 4. All checks passed! Apply all mutations atomically with zero partial state on errors
-            *bal = bal.saturating_sub(required_byte_years);
-            let remaining = *bal;
-            permit.send(VipQuotaPersistOp {
-                account_tag,
-                remaining,
-            });
-            drop(cache);
+                let required_byte_years = charge.byte_years;
+                self.evaluate_f2f_quota(&token_trimmed, required_byte_years, eff_now_ms)?;
+                self.f2f_writes_today.fetch_add(1, Ordering::Relaxed);
+                self.thermometer
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_write_ingress(now_sec, footprint_micro_bj);
 
-            *counter = candidate_counter;
-            drop(vip_usage);
-
-            self.vip_writes_today.fetch_add(1, Ordering::Relaxed);
-            self.thermometer
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .record_write_ingress(now_sec, footprint_micro_bj);
-
-            return Ok(IngressTier::Tier1Vip);
-        }
-
-        // 2. Check Tier 2 (F2F Peer) with Spec 09 dynamic daily quota
-        if let Some(token) = peer_token {
-            let token_trimmed = token.trim();
-            let is_valid = self
-                .f2f_tokens
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains(token_trimmed);
-            if !is_valid {
-                return Err(IngressError::InvalidPeerToken);
+                Ok(IngressTier::Tier2F2F)
             }
-
-            let token_hash = compute_friends_token_hash(token_trimmed);
-            let token_hash_hex = hex::encode(token_hash);
-            if let Some(meta) = self
-                .f2f_clients
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_mut(&token_hash_hex)
-            {
-                meta.last_active_ms = Some(eff_now_ms);
-            }
-
-            if is_retry {
-                return Ok(IngressTier::Tier2F2F);
-            }
-
-            let required_byte_years = charge.byte_years;
-            self.evaluate_f2f_quota(token_trimmed, required_byte_years, eff_now_ms)?;
-            self.f2f_writes_today.fetch_add(1, Ordering::Relaxed);
-            self.thermometer
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .record_write_ingress(now_sec, footprint_micro_bj);
-
-            return Ok(IngressTier::Tier2F2F);
-        }
-
-        // 3. Check Tier 3 (Public - BLAKE3 PoW)
-        // Fix S05-06: Shared O(1) RollingQuotaCounter for the entire anonymous pool - zero parent_lock hashmap!
-        let required_byte_years = charge.byte_years;
-        let daily_quota = self.calculate_daily_quota(1.0, 1.0);
-        let p = parent_lock.copied().unwrap_or([0u8; 32]);
-
-        if self.pow_engine.default_difficulty() == 0 {
-            if is_retry {
-                return Ok(IngressTier::Tier3Public);
-            }
-
-            let mut free_usage = self
-                .free_rolling_usage
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            free_usage
-                .try_consume(now_sec, required_byte_years, daily_quota)
-                .map_err(|available| IngressError::QuotaExceeded {
-                    available,
-                    required: required_byte_years,
-                })?;
-            drop(free_usage);
-
-            self.free_writes_today.fetch_add(1, Ordering::Relaxed);
-            self.thermometer
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .record_write_ingress(now_sec, footprint_micro_bj);
-            return Ok(IngressTier::Tier3Public);
-        }
-
-        let load_factor = (self.rolling_24h_average_at(now_sec) as f64
-            / self.effective_ncb().max(1) as f64)
-            .clamp(0.0, 1.0);
-        let dynamic_difficulty = self.pow_engine.required_difficulty_for_load(load_factor);
-
-        match (pow_challenge, pow_nonce) {
-            (Some(challenge), Some(nonce)) => {
-                self.pow_engine
-                    .verify_pow_for_parent_at(
-                        challenge,
-                        nonce,
-                        dynamic_difficulty,
-                        parent_lock,
-                        now_sec,
-                    )
-                    .await?;
-
+            ValidatedTierCredential::Public => {
                 if is_retry {
                     return Ok(IngressTier::Tier3Public);
                 }
+
+                // Fix S05-06: Shared O(1) RollingQuotaCounter for the entire anonymous pool - zero parent_lock hashmap!
+                let required_byte_years = charge.byte_years;
+                let daily_quota = self.calculate_daily_quota(1.0, 1.0);
 
                 let mut free_usage = self
                     .free_rolling_usage
@@ -1749,15 +1813,6 @@ impl TierController {
                     .unwrap_or_else(|e| e.into_inner())
                     .record_write_ingress(now_sec, footprint_micro_bj);
                 Ok(IngressTier::Tier3Public)
-            }
-            _ => {
-                let (challenge, _, expires_at) =
-                    self.pow_engine.generate_challenge_for_parent_at(&p, now_sec);
-                Err(IngressError::PoWRequired {
-                    challenge,
-                    difficulty: dynamic_difficulty,
-                    expires_at,
-                })
             }
         }
     }

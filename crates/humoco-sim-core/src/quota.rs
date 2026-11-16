@@ -452,9 +452,10 @@ impl HourlySlottedRingBuffer {
         sum.min(u64::MAX as u128) as u64
     }
 
-    /// Computes the rolling 24h average: `rolling_24h_sum() / count.max(1) as u64`.
+    /// Computes the unweighted rolling 24h average across occupied slots using the full `u128`
+    /// slot sum before narrowing to `u64` (returns `0` when no slots are occupied).
     pub fn rolling_24h_average(&self) -> u64 {
-        self.rolling_24h_sum() / (self.slots.count().max(1) as u64)
+        self.slots.average().unwrap_or(0)
     }
 
     /// Fills all 24 slots with the seed value for a clean cold start.

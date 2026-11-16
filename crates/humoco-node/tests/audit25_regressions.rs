@@ -604,3 +604,379 @@ fn test_a25_r4_client_token_validator_enforces_strict_128bit_hex() {
         "  f2f_0123456789abcdef0123456789abcdef  "
     ));
 }
+
+// ---------------------------------------------------------------------------
+// S05-20: Single-lock early credential & PoW validation before root lookup/signing
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_s05_20_single_lock_rejects_invalid_credentials_and_work_before_root_lookup_and_signing() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use humoco_node::api::hmc::{calculate_l2_payload_hash, L2AuthPayload, L2LockRequest};
+    use humoco_node::ingress::pow::{count_leading_zero_bits, hash_work};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing::instrument::WithSubscriber;
+
+    struct RootLookupProbeSubscriber {
+        hits: Arc<AtomicUsize>,
+    }
+
+    struct MessageVisitor {
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                let formatted = format!("{value:?}");
+                if formatted.contains("Voucher root read permit saturated") {
+                    self.hits.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    impl tracing::Subscriber for RootLookupProbeSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = MessageVisitor {
+                hits: self.hits.clone(),
+            };
+            event.record(&mut visitor);
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    let temp = tempdir().expect("tempdir");
+    let storage = Arc::new(RedbStorage::open(&temp.path().join("s05_20.redb")).expect("open redb"));
+    let (engine, _worker) = DualTierEngine::new(storage.clone());
+    let pow = Arc::new(PowEngine::new(8));
+    let tier_controller = Arc::new(TierController::new(storage.clone(), pow.clone()));
+
+    let vip_tag = [0x44u8; 32];
+    tier_controller.topup_vip_quota(vip_tag, 10_000).unwrap();
+    let valid_vip_token = tier_controller.provision_vip_credential(vip_tag).unwrap();
+    let valid_f2f_token = format!("f2f_{}", hex::encode([0xCDu8; 16]));
+    tier_controller.register_f2f_peer(&valid_f2f_token);
+
+    let identity = NodeIdentity::generate();
+    let state = AppState::new(engine, storage, identity, tier_controller.clone(), pow.clone());
+    for shard in 0..=u16::MAX {
+        state.readiness_manager.mark_shard_ready(shard);
+    }
+
+    // Close fallback semaphore so any entry into lookup_local_voucher_root emits a deterministic trace event
+    // without touching disk.
+    state.voucher_root_reads.close();
+    let app = build_router(state.clone());
+
+    let now_ms = state.net_time_ms();
+    let now_sec = now_ms / 1000;
+    let slot = pow.current_epoch_slot(now_sec);
+
+    let sender_key = SigningKey::from_bytes(&[0x33u8; 32]);
+    let sender_pub = sender_key.verifying_key().to_bytes();
+
+    let make_spend = |voucher_id: &str, ds_tag: &str, tx_seed: u8| -> L2LockRequest {
+        let mut req = L2LockRequest {
+            causal_output: None,
+            auth: L2AuthPayload {
+                ephemeral_pubkey: sender_pub,
+                auth_signature: None,
+            },
+            layer2_voucher_id: voucher_id.to_string(),
+            ds_tag: Some(ds_tag.to_string()),
+            transaction_hash: [tx_seed; 32],
+            is_genesis: false,
+            sender_ephemeral_pub: sender_pub,
+            layer2_signature: [0u8; 64],
+            trap_r: Some("none".into()),
+            trap_s: Some("none".into()),
+            encrypted_timestamp: 0,
+            created_at_ms: now_ms,
+            deletable_at: None,
+            privacy_guard: Some("none".into()),
+        };
+        let h = calculate_l2_payload_hash(&req);
+        req.layer2_signature = sender_key.sign(&h).to_bytes();
+        req
+    };
+
+    let unknown_ds_tag = "unknown_root_spend_parent";
+    let unknown_parent = *blake3::hash(unknown_ds_tag.as_bytes()).as_bytes();
+    let unknown_spend = make_spend("unknown_voucher_s05_20", unknown_ds_tag, 0x11);
+    let unknown_spend_bytes = serde_json::to_vec(&unknown_spend).unwrap();
+
+    let (valid_challenge, diff, _) = pow.generate_challenge_for_parent_at(&unknown_parent, now_sec);
+    assert_eq!(diff, 8);
+    let valid_nonce = pow
+        .solve_pow_for_parent(&unknown_parent, diff, 100_000)
+        .expect("solve valid nonce");
+    let weak_nonce = (0..10_000u64)
+        .find(|&n| count_leading_zero_bits(&hash_work(&unknown_parent, slot, n)) < diff)
+        .expect("find insufficient-difficulty nonce");
+
+    let other_parent = *blake3::hash(b"other_parent_s05_20").as_bytes();
+    let (other_challenge, _, _) = pow.generate_challenge_for_parent_at(&other_parent, now_sec);
+    let other_nonce = pow
+        .solve_pow_for_parent(&other_parent, diff, 100_000)
+        .expect("solve other parent nonce");
+
+    let run_router = |req: Request<Body>| {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let sub = RootLookupProbeSubscriber { hits: hits.clone() };
+        let app_clone = app.clone();
+        async move {
+            let resp = app_clone.oneshot(req).with_subscriber(sub).await.unwrap();
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let json: Value = serde_json::from_slice(&bytes).unwrap();
+            (status, headers, json, hits.load(Ordering::SeqCst))
+        }
+    };
+
+    // 1. Missing credentials -> 401 PoWRequired, unsigned, no root lookup
+    let req_missing = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .body(Body::from(unknown_spend_bytes.clone()))
+        .unwrap();
+    let (st, hdrs, json, root_hits) = run_router(req_missing).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(json.get("error").and_then(|v| v.as_str()), Some("PoWRequired"));
+    assert_eq!(hdrs.get("x-required-difficulty").and_then(|v| v.to_str().ok()), Some("8"));
+    assert!(json.get("server_signature").is_none());
+    assert_eq!(root_hits, 0, "Missing credentials must not attempt root lookup");
+
+    // 2. Invalid VIP secret -> 401 InvalidAuthToken, unsigned, no root lookup
+    let req_bad_vip = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer vip_unknown_secret_0000")
+        .body(Body::from(unknown_spend_bytes.clone()))
+        .unwrap();
+    let (st, _, json, root_hits) = run_router(req_bad_vip).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(json.get("error").and_then(|v| v.as_str()), Some("InvalidAuthToken"));
+    assert!(json.get("server_signature").is_none(), "Invalid VIP must be unsigned");
+    assert_eq!(root_hits, 0, "Invalid VIP must reject before root lookup");
+
+    // 3. Invalid Friends secret -> 401 InvalidPeerToken, unsigned, no root lookup
+    let req_bad_f2f = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-peer-token", "f2f_ffffffffffffffffffffffffffffffff")
+        .body(Body::from(unknown_spend_bytes.clone()))
+        .unwrap();
+    let (st, _, json, root_hits) = run_router(req_bad_f2f).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(json.get("error").and_then(|v| v.as_str()), Some("InvalidPeerToken"));
+    assert!(json.get("server_signature").is_none(), "Invalid F2F must be unsigned");
+    assert_eq!(root_hits, 0, "Invalid F2F must reject before root lookup");
+
+    // 4. Malformed PoW challenge -> 401 InvalidPoW, unsigned, no root lookup
+    let req_bad_chal = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-pow-challenge", "not_valid_hex_challenge")
+        .header("x-pow-nonce", "0")
+        .body(Body::from(unknown_spend_bytes.clone()))
+        .unwrap();
+    let (st, _, json, root_hits) = run_router(req_bad_chal).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(json.get("error").and_then(|v| v.as_str()), Some("InvalidPoW"));
+    assert!(json.get("server_signature").is_none(), "Malformed challenge must be unsigned");
+    assert_eq!(root_hits, 0, "Malformed challenge must reject before root lookup");
+
+    // 5. Parent-mismatched PoW -> 401 InvalidPoW, unsigned, no root lookup
+    let req_wrong_parent = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-pow-challenge", &other_challenge)
+        .header("x-pow-nonce", other_nonce.to_string())
+        .body(Body::from(unknown_spend_bytes.clone()))
+        .unwrap();
+    let (st, _, json, root_hits) = run_router(req_wrong_parent).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(json.get("error").and_then(|v| v.as_str()), Some("InvalidPoW"));
+    assert!(json.get("server_signature").is_none(), "Parent mismatch must be unsigned");
+    assert_eq!(root_hits, 0, "Parent mismatch must reject before root lookup");
+
+    // 6. Valid parent-/slot-bound insufficient work -> 429 + X-Required-Difficulty, unsigned, no root lookup
+    let req_weak_pow = Request::builder()
+        .method("POST")
+        .uri("/v1/lock")
+        .header("content-type", "application/json")
+        .header("x-pow-challenge", &valid_challenge)
+        .header("x-pow-nonce", weak_nonce.to_string())
+        .body(Body::from(unknown_spend_bytes.clone()))
+        .unwrap();
+    let (st, hdrs, json, root_hits) = run_router(req_weak_pow).await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(hdrs.get("x-required-difficulty").and_then(|v| v.to_str().ok()), Some("8"));
+    assert_eq!(json.get("error").and_then(|v| v.as_str()), Some("InvalidPoW"));
+    assert!(json.get("server_signature").is_none(), "Insufficient work must be unsigned");
+    assert_eq!(root_hits, 0, "Insufficient work must reject before root lookup");
+
+    // 7. Valid credentials on unknown root reach root lookup & signed 400 without debiting credits/quota
+    for (name, hdr_k, hdr_v, extra_k, extra_v) in [
+        ("vip", "authorization", format!("Bearer {valid_vip_token}"), None, None),
+        ("f2f", "x-peer-token", valid_f2f_token.clone(), None, None),
+        (
+            "pow",
+            "x-pow-challenge",
+            valid_challenge.clone(),
+            Some("x-pow-nonce"),
+            Some(valid_nonce.to_string()),
+        ),
+    ] {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/v1/lock")
+            .header("content-type", "application/json")
+            .header(hdr_k, hdr_v);
+        if let (Some(k2), Some(v2)) = (extra_k, extra_v.as_ref()) {
+            builder = builder.header(k2, v2);
+        }
+        let req = builder.body(Body::from(unknown_spend_bytes.clone())).unwrap();
+        let (st, _, json, root_hits) = run_router(req).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "Valid {name} reaches unknown-root 400");
+        assert!(json.get("server_signature").is_some(), "Unknown-root 400 for valid {name} is signed");
+        assert_eq!(root_hits, 1, "Valid {name} reaches root fallback");
+    }
+    assert_eq!(
+        tier_controller.get_cached_vip_quota(&vip_tag),
+        Some(10_000),
+        "Early validation / unknown-root rejection must not debit VIP balance"
+    );
+    assert_eq!(
+        tier_controller.vip_rolling_usage_at_for_test(&vip_tag, now_ms),
+        0,
+        "Early validation / unknown-root rejection must not consume VIP rolling quota"
+    );
+    assert_eq!(
+        tier_controller.free_rolling_usage_at_for_test(now_ms),
+        0,
+        "Early validation / unknown-root rejection must not consume free rolling quota"
+    );
+
+    // 8. Real HTTP fixture: invalid admission, valid genesis + spend, and exact idempotent retry
+    let temp2 = tempdir().expect("tempdir2");
+    let storage2 = Arc::new(RedbStorage::open(&temp2.path().join("s05_20_http.redb")).expect("open redb"));
+    let (engine2, _worker2) = DualTierEngine::new(storage2.clone());
+    let pow2 = Arc::new(PowEngine::new(8));
+    let tc2 = Arc::new(TierController::new(storage2.clone(), pow2.clone()));
+    tc2.topup_vip_quota(vip_tag, 10_000).unwrap();
+    let vip2 = tc2.provision_vip_credential(vip_tag).unwrap();
+    let f2f2 = format!("f2f_{}", hex::encode([0xEFu8; 16]));
+    tc2.register_f2f_peer(&f2f2);
+
+    let state2 = AppState::new(engine2, storage2, NodeIdentity::generate(), tc2.clone(), pow2.clone());
+    for shard in 0..=u16::MAX {
+        state2.readiness_manager.mark_shard_ready(shard);
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, build_router(state2)).await;
+    });
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("http://{addr}/v1/lock");
+
+    // 8a. Insufficient work over real HTTP -> 429 + x-required-difficulty + unsigned
+    let http_weak = client
+        .post(&url)
+        .header("x-pow-challenge", &valid_challenge)
+        .header("x-pow-nonce", weak_nonce.to_string())
+        .json(&unknown_spend)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(http_weak.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        http_weak
+            .headers()
+            .get("x-required-difficulty")
+            .and_then(|v| v.to_str().ok()),
+        Some("8")
+    );
+    let weak_json: Value = http_weak.json().await.unwrap();
+    assert!(weak_json.get("server_signature").is_none());
+
+    // 8b. Anchor valid genesis with F2F token -> 201 Created
+    let valid_until_ms = now_ms + 86_400_000;
+    let mut genesis = L2LockRequest {
+        causal_output: None,
+        auth: L2AuthPayload {
+            ephemeral_pubkey: sender_pub,
+            auth_signature: None,
+        },
+        layer2_voucher_id: "known_voucher_s05_20".into(),
+        ds_tag: None,
+        transaction_hash: [0x77u8; 32],
+        is_genesis: true,
+        sender_ephemeral_pub: sender_pub,
+        layer2_signature: [0u8; 64],
+        trap_r: Some("none".into()),
+        trap_s: Some("none".into()),
+        encrypted_timestamp: 0,
+        created_at_ms: now_ms,
+        deletable_at: Some(valid_until_ms.to_string()),
+        privacy_guard: Some("none".into()),
+    };
+    genesis.layer2_signature = sender_key.sign(&calculate_l2_payload_hash(&genesis)).to_bytes();
+    let gen_resp = client
+        .post(&url)
+        .header("x-peer-token", &f2f2)
+        .json(&genesis)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gen_resp.status(), reqwest::StatusCode::CREATED);
+
+    // 8c. Valid spend with VIP token -> 201 Created (charges once) and exact retry -> 200 OK (no double charge)
+    let known_spend = make_spend("known_voucher_s05_20", "known_ds_tag_s05_20", 0x88);
+    let spend_resp1 = client
+        .post(&url)
+        .header("authorization", format!("Bearer {vip2}"))
+        .json(&known_spend)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spend_resp1.status(), reqwest::StatusCode::CREATED);
+    let bal_after_first = tc2.get_cached_vip_quota(&vip_tag).unwrap();
+    assert!(bal_after_first < 10_000, "Valid spend must debit VIP balance once");
+
+    let spend_resp2 = client
+        .post(&url)
+        .header("authorization", format!("Bearer {vip2}"))
+        .json(&known_spend)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spend_resp2.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        tc2.get_cached_vip_quota(&vip_tag).unwrap(),
+        bal_after_first,
+        "Exact retry must not double-charge VIP balance"
+    );
+
+    server_handle.abort();
+}
+

@@ -597,3 +597,76 @@ fn test_s08_14_core_quota_maps_retain_fractional_usage_on_cleanup() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// S08-17: HourlySlottedRingBuffer::rolling_24h_average avoids premature u64 sum saturation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_s08_17_hourly_slotted_ring_buffer_average_full_u128_sum() {
+    // 1. Empty control
+    let empty = HourlySlottedRingBuffer::new();
+    assert_eq!(empty.count(), 0);
+    assert_eq!(empty.rolling_24h_sum(), 0);
+    assert_eq!(empty.rolling_24h_average(), 0);
+
+    // 2. Single-slot u64::MAX control
+    let mut single = HourlySlottedRingBuffer::new();
+    single.record_hourly_median(0, u64::MAX);
+    assert_eq!(single.count(), 1);
+    assert_eq!(single.rolling_24h_sum(), u64::MAX);
+    assert_eq!(single.rolling_24h_average(), u64::MAX);
+
+    // 3. Two slots of u64::MAX -> sum saturates to u64::MAX, average must be u64::MAX
+    let mut two_max = HourlySlottedRingBuffer::new();
+    two_max.record_hourly_median(0, u64::MAX);
+    two_max.record_hourly_median(1, u64::MAX);
+    assert_eq!(two_max.count(), 2);
+    assert_eq!(two_max.rolling_24h_sum(), u64::MAX);
+    assert_eq!(two_max.rolling_24h_average(), u64::MAX);
+
+    // 4. 24 slots of u64::MAX -> sum saturates to u64::MAX, average must be u64::MAX
+    let mut all_max = HourlySlottedRingBuffer::new();
+    for h in 0..24u64 {
+        all_max.record_hourly_median(h, u64::MAX);
+    }
+    assert_eq!(all_max.count(), 24);
+    assert_eq!(all_max.rolling_24h_sum(), u64::MAX);
+    assert_eq!(all_max.rolling_24h_average(), u64::MAX);
+
+    // 5. Mixed large values exceeding u64::MAX when summed
+    let mut mixed = HourlySlottedRingBuffer::new();
+    let v0 = u64::MAX - 10;
+    let v1 = u64::MAX / 2;
+    let v2 = u64::MAX - 20;
+    mixed.record_hourly_median(10, v0);
+    mixed.record_hourly_median(11, v1);
+    mixed.record_hourly_median(12, v2);
+    let expected_mixed_avg = ((v0 as u128 + v1 as u128 + v2 as u128) / 3) as u64;
+    assert_eq!(mixed.count(), 3);
+    assert_eq!(mixed.rolling_24h_sum(), u64::MAX);
+    assert_eq!(mixed.rolling_24h_average(), expected_mixed_avg);
+
+    // 6. Duplicate-hour and modulo-slot replacement with large values
+    mixed.record_hourly_median(12, 0);
+    let expected_dup_avg = ((v0 as u128 + v1 as u128) / 3) as u64;
+    assert_eq!(mixed.count(), 3);
+    assert_eq!(mixed.rolling_24h_sum(), u64::MAX);
+    assert_eq!(mixed.rolling_24h_average(), expected_dup_avg);
+
+    // Modulo-slot overwrite (hour 34 -> slot 10) replaces v0 with ordinary value 300
+    mixed.record_hourly_median(34, 300);
+    let expected_mod_avg = ((300u128 + v1 as u128) / 3) as u64;
+    assert_eq!(mixed.count(), 3);
+    assert_eq!(mixed.rolling_24h_sum(), 300 + v1);
+    assert_eq!(mixed.rolling_24h_average(), expected_mod_avg);
+
+    // 7. Ordinary small values control
+    let mut ordinary = HourlySlottedRingBuffer::new();
+    ordinary.record_hourly_median(0, 100);
+    ordinary.record_hourly_median(1, 200);
+    ordinary.record_hourly_median(2, 600);
+    assert_eq!(ordinary.rolling_24h_sum(), 900);
+    assert_eq!(ordinary.rolling_24h_average(), 300);
+}
+
+

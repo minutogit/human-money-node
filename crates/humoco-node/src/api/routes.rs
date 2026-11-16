@@ -2485,23 +2485,9 @@ async fn submit_hmc_lock_with_deadline(
     state.metrics.record_write();
     let now_ms = state.net_time_ms();
 
-    const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
-    if !req.is_genesis
-        && (req.created_at_ms == 0
-            || req.created_at_ms > now_ms.saturating_add(MAX_SENDER_CLOCK_DRIFT_MS))
-    {
-        let envelope = wrap_and_sign_verdict(
-            &state.identity,
-            L2Verdict::Rejected {
-                reason: "Sender timestamp outside 30s clock drift window".into(),
-            },
-        );
-        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
-    }
-
-    // # Early Inexpensive Ingress Admission (A25-04 / Rule 9):
-    // Validate credentials presence before any disk lookups (get_hmc_voucher_root_valid)
-    // or asymmetric signing operations.
+    // # Early Inexpensive Ingress Admission (A25-04 / S05-20 / Rule 6):
+    // Validate credentials and stateless PoW purely in memory BEFORE clock-drift signing,
+    // exceptional voucher root disk lookups (lookup_local_voucher_root), or asymmetric signing.
     let auth_token = headers
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
@@ -2521,23 +2507,33 @@ async fn submit_hmc_lock_with_deadline(
     };
     let parent_for_pow = parent_for_pow_val.as_ref();
 
-    let has_credentials = auth_token.is_some()
-        || peer_token.is_some()
-        || (pow_challenge.is_some() && pow_nonce.is_some());
+    if let Err(err) = state
+        .tier_controller
+        .validate_credentials_with_time(
+            auth_token,
+            peer_token,
+            pow_challenge,
+            pow_nonce,
+            parent_for_pow,
+            Some(now_ms),
+        )
+        .await
+    {
+        return map_ingress_error(&state, err, auth_token.is_some());
+    }
 
-    if !has_credentials && state.pow_engine.default_difficulty() > 0 {
-        let (challenge, difficulty, expires_at) = state
-            .pow_engine
-            .generate_challenge_for_parent(parent_for_pow.unwrap_or(&[0u8; 32]));
-        return map_ingress_error(
-            &state,
-            IngressError::PoWRequired {
-                challenge,
-                difficulty,
-                expires_at,
+    const MAX_SENDER_CLOCK_DRIFT_MS: u64 = 30_000;
+    if !req.is_genesis
+        && (req.created_at_ms == 0
+            || req.created_at_ms > now_ms.saturating_add(MAX_SENDER_CLOCK_DRIFT_MS))
+    {
+        let envelope = wrap_and_sign_verdict(
+            &state.identity,
+            L2Verdict::Rejected {
+                reason: "Sender timestamp outside 30s clock drift window".into(),
             },
-            false,
         );
+        return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
     }
 
     let (valid_until, root_valid_until) = if req.is_genesis {

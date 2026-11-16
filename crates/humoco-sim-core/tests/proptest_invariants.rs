@@ -109,7 +109,7 @@ proptest! {
     /// Values remain within proper mathematical bounds.
     #[test]
     fn prop_hourly_slotted_ring_buffer_bounds(
-        entries in prop::collection::vec((0u64..10_000u64, 0u64..100_000_000u64), 1..=100)
+        entries in prop::collection::vec((0u64..10_000u64, any::<u64>()), 1..=100)
     ) {
         let mut ring = HourlySlottedRingBuffer::new();
         prop_assert_eq!(ring.count(), 0);
@@ -132,7 +132,8 @@ proptest! {
                 prop_assert!(ring.count() >= prev_count.min(24));
             }
 
-            // Invariant: sum is accurately reflected
+            // Independent u128 reference sum across all 24 slots (unoccupied slots are 0).
+            let ref_sum_u128: u128 = ring.slots().iter().map(|&v| v as u128).sum();
             let sum = ring.rolling_24h_sum();
             let avg = ring.rolling_24h_average();
 
@@ -140,7 +141,8 @@ proptest! {
                 prop_assert_eq!(sum, 0);
                 prop_assert_eq!(avg, 0);
             } else {
-                prop_assert_eq!(avg, sum / (ring.count() as u64));
+                prop_assert_eq!(sum, ref_sum_u128.min(u64::MAX as u128) as u64);
+                prop_assert_eq!(avg, (ref_sum_u128 / (ring.count() as u128)) as u64);
                 prop_assert!(avg <= sum);
             }
         }

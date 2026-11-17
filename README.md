@@ -3,11 +3,11 @@
 > **Credo:** *"In decentralization there is no trust, only mathematical proofs."*  
 > **Doctrine:** *"Subtraction before Construction – No I/O on the Hot Path – Strict 409 Collision Semantics"*
 
-> [!IMPORTANT]
-> **🚧 Project Status: Active Development / Pre-Testnet**  
-> `human-money-node` is currently in the active development and testing phase. The implementation of consensus and node subsystems (Phases 0 through 6) is complete and verified with 100% passing tests, but **no public live network / testnet nodes are operating yet**. The software is currently intended for developers, researchers, and local simulation / integration with [`human-money-core`](https://github.com/humoco/human-money-core).
+> [!WARNING]
+> **❄️ Project Status: Frozen (Superseded by `humoco-sync` Lock Channel)**  
+> As of `NODE-004` (2026-11-17), `human-money-node` is **frozen** and no longer actively depended on by [`human-money-core`](../human-money-core/) or [`human-money-app`](../human-money-app/). Online Layer-2 double-spend protection now uses voucher-pinned `LockCommittee` sets hosted on [`humoco-sync`](../humoco-sync/) servers (see [`docs/concepts/sync_double_spend_schutz_plan.md`](../docs/concepts/sync_double_spend_schutz_plan.md)). All crates and tests here are intentionally preserved as historical reference.
 
-Human Money Node is **not a blockchain** and **not an account ledger**, but an ultra-fast, asynchronous **Collision Lock Registry** that retains live collision state while clients retain full voucher histories (Chain of Authority / Layer 2 for Human Money). Its sole purpose is to mathematically guarantee the uniqueness of cryptographic voucher paths (double-spend prevention) via *stealth locking* (`parent_lock -> child_lock`).
+Human Money Node was designed as an asynchronous **Collision Lock Registry** (Chain of Authority / Layer 2 for Human Money) prior to the `humoco-sync` Lock Channel pivot. Its implementation remains intact on disk for architectural reference.
 
 ---
 

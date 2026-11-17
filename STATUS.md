@@ -1,12 +1,18 @@
 ---
 project: human-money-node
 version: "0.1.1"
-phase: "active-development"
-health: "green"
-last_updated: "2026-11-01"
+phase: "frozen"
+health: "frozen"
+last_updated: "2026-11-17"
 blocks: []
 blocked_by: []
 priority_tasks:
+  - id: "NODE-004"
+    title: "Freeze human-money-node Architecture in Favor of humoco-sync LockChannel"
+    status: "completed"
+    priority: "high"
+    depends_on: ["CORE-020", "APP-070"]
+    description: "Marked `human-money-node` officially Frozen (`NODE-002` cancelled). All `human-money-core` and `human-money-app` Layer-2 clients migrated to voucher-pinned `humoco-sync` Sync-Lock Committees per `../docs/concepts/sync_double_spend_schutz_plan.md`. Existing simulation/daemon code and tests remain preserved on disk for architectural reference."
   - id: "NODE-003"
     title: "14/20 Unoccupied Live Proofs, 1-RTT Offline-Buyer Checkout & Signed MissingLocks Anchor"
     status: "completed"
@@ -21,19 +27,18 @@ priority_tasks:
     description: "Integrated human-money-core client flow with human-money-node ingress API: aligned `hmc.rs` domain tag to canonical `HMC_TX_AUTH_V4_DOMAIN`, exposed 5s-cached public `GET /v1/regional-mesh-view`, delegated stateless PoW evaluation directly to canonical `humoco-proto`, and permitted past `created_at_ms` timestamps for offline spends and retries."
   - id: "NODE-002"
     title: "Multi-Node Testnet Deployment & Stress Testing"
-    status: "open"
+    status: "cancelled"
     priority: "medium"
     depends_on: []
-    description: "Deploy distributed testnet across multiple machines/containers to stress-test QUIC gossip and village merge"
+    description: "Cancelled due to ecosystem architecture pivot (`NODE-004`): double-spend protection now operates via `humoco-sync` LockChannel committees rather than a dedicated node mesh."
 ---
 
 # Human Money Node — Status
 
 ## Current Focus
-- Layer-2 double-spend prevention node daemon (Chain of Authority / Collision Lock Registry).
-- Multi-crate workspace: `crates/humoco-sim-core` (mathematical protocol & deterministic simulation engine) + `crates/humoco-node` (production daemon with Quinn QUIC, Axum REST, redb persistence, CLI).
-- Proof-carrying ingress API aligned with Core v0.5.1 and App v0.4.0 (`NODE-001` & `NODE-003` completed): 1-RTT offline-buyer checkout, 14/20 `Unoccupied` live state proofs, signed `MissingLocks` anchor attachment, and public cached regional mesh views.
-- Next: WAN testnet deployment and partition/merge stress testing (`NODE-002`).
+- **❄️ FROZEN (`NODE-004`):** `human-money-node` is frozen and no longer used as the Layer-2 backend by `humoco-proto`, `human-money-core`, or `human-money-app`.
+- Layer-2 double-spend protection is now implemented via voucher-pinned `LockCommittee` Sync-Locks on `humoco-sync` servers (see [`../docs/concepts/sync_double_spend_schutz_plan.md`](../docs/concepts/sync_double_spend_schutz_plan.md)).
+- Existing code in `crates/humoco-sim-core` and `crates/humoco-node` is intentionally preserved as architectural reference without deleting code.
 
 ## Recent Milestones
 - [x] **Phase 0**: Mathematical foundation & simulation core (70+ unit/integration tests)
